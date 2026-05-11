@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: hellfire-postgis
+    environment:
+      POSTGRES_DB: hellfire
+      POSTGRES_USER: hellfire
+      POSTGRES_PASSWORD: hellfire_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - hellfire-postgis-data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hellfire -d hellfire"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  hellfire-postgis-data:

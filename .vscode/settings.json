@@ -1,0 +1,5 @@
+{
+  "livePreview.useIntegratedBrowser": true,
+  "simpleBrowser.useIntegratedBrowser": true,
+  "workbench.browser.openLocalhostLinks": true
+}

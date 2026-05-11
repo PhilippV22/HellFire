@@ -1,0 +1,38 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "HellFire: dev server",
+      "type": "shell",
+      "command": "npm run dev",
+      "isBackground": true,
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PATH": "/usr/local/opt/node@22/bin:${env:PATH}"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": {
+        "owner": "nextjs",
+        "pattern": [
+          {
+            "regexp": "^(.*):(\\d+):(.*)$",
+            "file": 1,
+            "line": 2,
+            "message": 3
+          }
+        ],
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^.*next dev.*$",
+          "endsPattern": "^.*Ready in.*$"
+        }
+      }
+    }
+  ]
+}
