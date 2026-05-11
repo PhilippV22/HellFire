@@ -1,5 +1,5 @@
-import { Dashboard } from "@/components/Dashboard";
+import { EarthSituationMonitor } from "@/components/EarthSituationMonitor";
 
 export default function Home() {
-  return <Dashboard />;
+  return <EarthSituationMonitor />;
 }
