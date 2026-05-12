@@ -40,10 +40,26 @@ type ZoomRenderState = SurfaceFocus & {
   level: ZoomRenderLevel;
   tileKey: string;
   distance: number;
+  satelliteStatus: "fallback" | "loading" | "ready" | "error";
+  satelliteZoom?: number;
+};
+
+type ZoomRenderPatch = SurfaceFocus & {
+  level: ZoomRenderLevel;
+  tileKey: string;
+  distance: number;
+  satelliteStatus?: ZoomRenderState["satelliteStatus"];
+  satelliteZoom?: number;
 };
 
 const globeRadius = 1.8;
+const satelliteTileOffset = 0.00008;
+const satelliteMinDistance = globeRadius + 0.00016;
 const texturePath = "/earth/land_ocean_ice_2048.jpg";
+const customSatelliteTileUrlTemplate =
+  process.env.NEXT_PUBLIC_SATELLITE_TILE_URL_TEMPLATE?.trim();
+const satelliteTileUrlTemplate =
+  customSatelliteTileUrlTemplate || "/api/satellite/{z}/{x}/{y}";
 
 export function EarthGlobe({
   events,
@@ -61,7 +77,13 @@ export function EarthGlobe({
   const targetQuaternionRef = useRef<THREE.Quaternion | null>(null);
   const targetCameraDistanceRef = useRef<number | null>(null);
   const detailLayerRef = useRef<THREE.Group | null>(null);
+  const satelliteLayerRef = useRef<THREE.Group | null>(null);
+  const tileTextureCacheRef = useRef(new Map<string, THREE.Texture>());
+  const textureAnisotropyRef = useRef(1);
+  const lastSatelliteLoadTimeRef = useRef(0);
+  const prefetchedSatelliteKeysRef = useRef(new Set<string>());
   const renderedTileKeyRef = useRef("");
+  const renderedSatelliteKeyRef = useRef("");
   const wheelFocusRef = useRef<SurfaceFocus | null>(null);
   const autoRotateTimerRef = useRef<number | null>(null);
   const [markerPositions, setMarkerPositions] = useState<MarkerPosition[]>([]);
@@ -70,7 +92,8 @@ export function EarthGlobe({
     longitude: 0,
     level: "global",
     tileKey: "global",
-    distance: 5.1
+    distance: 5.1,
+    satelliteStatus: satelliteTileUrlTemplate ? "loading" : "fallback"
   });
   const selectedEventId = selectedEvent?.id;
 
@@ -113,16 +136,27 @@ export function EarthGlobe({
     }, 4500);
   }, []);
 
-  const updateZoomRenderState = useCallback((nextState: ZoomRenderState) => {
+  const updateZoomRenderState = useCallback((nextState: ZoomRenderPatch) => {
     setZoomRenderState((previous) => {
+      const merged = {
+        ...previous,
+        ...nextState,
+        satelliteStatus: nextState.satelliteStatus ?? previous.satelliteStatus,
+        satelliteZoom: Object.hasOwn(nextState, "satelliteZoom")
+          ? nextState.satelliteZoom
+          : previous.satelliteZoom
+      };
+
       if (
-        previous.tileKey === nextState.tileKey &&
-        Math.abs(previous.distance - nextState.distance) < 0.04
+        previous.tileKey === merged.tileKey &&
+        previous.satelliteStatus === merged.satelliteStatus &&
+        previous.satelliteZoom === merged.satelliteZoom &&
+        Math.abs(previous.distance - merged.distance) < 0.04
       ) {
         return previous;
       }
 
-      return nextState;
+      return merged;
     });
   }, []);
 
@@ -185,6 +219,128 @@ export function EarthGlobe({
     [updateZoomRenderState]
   );
 
+  const updateSatelliteTileLayer = useCallback(
+    (
+      camera: THREE.PerspectiveCamera,
+      earth: THREE.Mesh,
+      satelliteLayer: THREE.Group
+    ) => {
+      const distance = camera.position.length();
+      const tilePlan = getSatelliteTilePlan(camera);
+      const focus =
+        wheelFocusRef.current ??
+        getSurfaceFocusFromCenter(camera, earth);
+
+      if (!focus || !satelliteTileUrlTemplate || !tilePlan) {
+        if (renderedSatelliteKeyRef.current !== "off") {
+          disposeChildren(satelliteLayer);
+          satelliteLayer.clear();
+          renderedSatelliteKeyRef.current = "off";
+        }
+
+        updateZoomRenderState({
+          latitude: focus?.latitude ?? 0,
+          longitude: focus?.longitude ?? 0,
+          level: getZoomRenderLevel(distance),
+          tileKey: renderedTileKeyRef.current || "global",
+          distance,
+          satelliteStatus: satelliteTileUrlTemplate ? "loading" : "fallback",
+          satelliteZoom: undefined
+        });
+        return;
+      }
+
+      const centerTile = latLngToXyzTile(
+        focus.latitude,
+        focus.longitude,
+        tilePlan.zoom
+      );
+      const satelliteKey = [
+        "satellite",
+        tilePlan.zoom,
+        centerTile.x,
+        centerTile.y,
+        tilePlan.radius
+      ].join(":");
+
+      if (renderedSatelliteKeyRef.current === satelliteKey) {
+        return;
+      }
+
+      const now = performance.now();
+
+      if (now - lastSatelliteLoadTimeRef.current < 700) {
+        return;
+      }
+
+      lastSatelliteLoadTimeRef.current = now;
+      renderedSatelliteKeyRef.current = satelliteKey;
+
+      updateZoomRenderState({
+        ...focus,
+        level: getZoomRenderLevel(distance),
+        tileKey: renderedTileKeyRef.current || getDetailTileKey(focus, getZoomRenderLevel(distance)),
+        distance,
+        satelliteStatus: "loading",
+        satelliteZoom: tilePlan.zoom
+      });
+
+      loadSatelliteTileSet(
+        centerTile,
+        tilePlan.radius,
+        tileTextureCacheRef.current,
+        satelliteTileUrlTemplate,
+        textureAnisotropyRef.current,
+        terrainFeatures
+      )
+        .then((tileSet) => {
+          if (renderedSatelliteKeyRef.current !== satelliteKey) {
+            disposeChildren(tileSet);
+            return;
+          }
+
+          disposeChildren(satelliteLayer);
+          satelliteLayer.clear();
+          satelliteLayer.add(tileSet);
+          void prefetchSatelliteTileLevels(
+            focus,
+            tilePlan,
+            prefetchedSatelliteKeysRef.current,
+            tileTextureCacheRef.current,
+            satelliteTileUrlTemplate,
+            textureAnisotropyRef.current
+          );
+          updateZoomRenderState({
+            ...focus,
+            level: getZoomRenderLevel(camera.position.length()),
+            tileKey:
+              renderedTileKeyRef.current ||
+              getDetailTileKey(focus, getZoomRenderLevel(camera.position.length())),
+            distance: camera.position.length(),
+            satelliteStatus: "ready",
+            satelliteZoom: tilePlan.zoom
+          });
+        })
+        .catch(() => {
+          if (renderedSatelliteKeyRef.current !== satelliteKey) {
+            return;
+          }
+
+          updateZoomRenderState({
+            ...focus,
+            level: getZoomRenderLevel(camera.position.length()),
+            tileKey:
+              renderedTileKeyRef.current ||
+              getDetailTileKey(focus, getZoomRenderLevel(camera.position.length())),
+            distance: camera.position.length(),
+            satelliteStatus: satelliteLayer.children.length > 0 ? "ready" : "error",
+            satelliteZoom: tilePlan.zoom
+          });
+        });
+    },
+    [terrainFeatures, updateZoomRenderState]
+  );
+
   useEffect(() => {
     if (selectedEvent) {
       focusEvent(selectedEvent);
@@ -199,6 +355,8 @@ export function EarthGlobe({
     }
 
     const mountElement = mount;
+    const tileTextureCache = tileTextureCacheRef.current;
+    const prefetchedSatelliteKeys = prefetchedSatelliteKeysRef.current;
 
     const scene = new THREE.Scene();
     const renderer = new THREE.WebGLRenderer({
@@ -209,12 +367,13 @@ export function EarthGlobe({
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(mountElement.clientWidth, mountElement.clientHeight);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    textureAnisotropyRef.current = renderer.capabilities.getMaxAnisotropy();
     mountElement.appendChild(renderer.domElement);
 
     const camera = new THREE.PerspectiveCamera(
       42,
       mountElement.clientWidth / mountElement.clientHeight,
-      0.01,
+      0.00001,
       100
     );
     camera.position.set(0, 0.18, 5.1);
@@ -224,7 +383,7 @@ export function EarthGlobe({
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.enablePan = false;
-    controls.minDistance = 1.87;
+    controls.minDistance = satelliteMinDistance;
     controls.maxDistance = 6.2;
     controls.rotateSpeed = 0.42;
     controls.zoomSpeed = 0.58;
@@ -317,6 +476,11 @@ export function EarthGlobe({
     detailLayerRef.current = detailLayer;
     earthGroup.add(detailLayer);
 
+    const satelliteLayer = new THREE.Group();
+    satelliteLayer.name = "streamed-satellite-tile-layer";
+    satelliteLayerRef.current = satelliteLayer;
+    earthGroup.add(satelliteLayer);
+
     scene.add(createStarField());
 
     const initialSelectedEvent = initialSelectedEventRef.current;
@@ -362,9 +526,11 @@ export function EarthGlobe({
         }
       }
 
+      applyAdaptiveControlSensitivity(controls, camera.position.length());
       controls.update();
-      terrainLayer.visible = camera.position.length() > 2.24;
+      terrainLayer.visible = shouldShowTerrainLayer(camera.position.length());
       updateZoomDetailLayer(camera, earthGroup, earth, detailLayer);
+      updateSatelliteTileLayer(camera, earth, satelliteLayer);
       renderer.render(scene, camera);
       setMarkerPositions(
         getMarkerPositions(mountElement, camera, earthGroup, eventsRef.current)
@@ -389,14 +555,18 @@ export function EarthGlobe({
       controls.dispose();
       texture.dispose();
       disposeScene(scene);
+      tileTextureCache.forEach((tileTexture) => tileTexture.dispose());
+      tileTextureCache.clear();
+      prefetchedSatelliteKeys.clear();
       renderer.dispose();
       renderer.domElement.remove();
       cameraRef.current = null;
       controlsRef.current = null;
       earthGroupRef.current = null;
       detailLayerRef.current = null;
+      satelliteLayerRef.current = null;
     };
-  }, [terrainFeatures, updateZoomDetailLayer]);
+  }, [terrainFeatures, updateSatelliteTileLayer, updateZoomDetailLayer]);
 
   function zoom(delta: number) {
     const camera = cameraRef.current;
@@ -407,8 +577,9 @@ export function EarthGlobe({
     }
 
     const direction = camera.position.clone().normalize();
+    const distance = camera.position.length();
     const nextDistance = THREE.MathUtils.clamp(
-      camera.position.length() + delta,
+      distance + getAdaptiveZoomDelta(delta, distance),
       controls.minDistance,
       controls.maxDistance
     );
@@ -431,16 +602,24 @@ export function EarthGlobe({
     targetCameraDistanceRef.current = null;
     wheelFocusRef.current = null;
     renderedTileKeyRef.current = "";
+    renderedSatelliteKeyRef.current = "";
+    lastSatelliteLoadTimeRef.current = 0;
+    prefetchedSatelliteKeysRef.current.clear();
     if (detailLayerRef.current) {
       disposeChildren(detailLayerRef.current);
       detailLayerRef.current.clear();
+    }
+    if (satelliteLayerRef.current) {
+      disposeChildren(satelliteLayerRef.current);
+      satelliteLayerRef.current.clear();
     }
     setZoomRenderState({
       latitude: 0,
       longitude: 0,
       level: "global",
       tileKey: "global",
-      distance: 5.1
+      distance: 5.1,
+      satelliteStatus: satelliteTileUrlTemplate ? "loading" : "fallback"
     });
     earthGroup.rotation.set(0, -0.78, 0);
     camera.position.set(0, 0.18, 5.1);
@@ -455,7 +634,7 @@ export function EarthGlobe({
       <div className="earth-vignette pointer-events-none absolute inset-0" />
       <div className="pointer-events-none absolute left-1/2 top-24 z-20 hidden -translate-x-1/2 rounded-md border border-white/10 bg-slate-950/70 px-3 py-2 text-center text-xs text-slate-300 shadow-xl backdrop-blur-md md:block">
         <span className="block font-semibold uppercase tracking-[0.14em] text-cyan-300">
-          {zoomRenderLabel(zoomRenderState.level)}
+          {zoomRenderLabel(zoomRenderState)}
         </span>
         <span className="mt-1 block text-[11px] text-slate-400">
           {formatCoordinate(zoomRenderState.latitude, "lat")} ·{" "}
@@ -497,7 +676,7 @@ export function EarthGlobe({
         })}
       </div>
 
-      <div className="pointer-events-auto absolute right-3 top-24 z-20 flex flex-col gap-2 sm:right-4">
+      <div className="pointer-events-auto absolute right-3 top-24 z-30 flex flex-col gap-2 sm:right-4 xl:right-[430px]">
         <button
           type="button"
           className="grid h-10 w-10 place-items-center rounded-md border border-white/10 bg-slate-950/80 text-lg text-white shadow-xl backdrop-blur-md transition hover:border-cyan-300"
@@ -596,6 +775,437 @@ function getZoomRenderLevel(distance: number): ZoomRenderLevel {
   return "global";
 }
 
+type SatelliteTilePlan = {
+  zoom: number;
+  radius: number;
+};
+
+type LoadedSatelliteTile = {
+  tile: XyzTile;
+  texture: THREE.Texture;
+};
+
+function applyAdaptiveControlSensitivity(
+  controls: OrbitControls,
+  distance: number
+) {
+  const rangeProgress = THREE.MathUtils.clamp(
+    (distance - satelliteMinDistance) / (controls.maxDistance - satelliteMinDistance),
+    0,
+    1
+  );
+  const easedProgress = rangeProgress * rangeProgress * (3 - 2 * rangeProgress);
+
+  controls.rotateSpeed = THREE.MathUtils.lerp(0.018, 0.42, easedProgress);
+  controls.zoomSpeed = THREE.MathUtils.lerp(0.028, 0.58, easedProgress);
+  controls.dampingFactor = THREE.MathUtils.lerp(0.16, 0.08, easedProgress);
+}
+
+function getAdaptiveZoomDelta(delta: number, distance: number) {
+  const direction = Math.sign(delta) || 1;
+  const surfaceDistance = Math.max(distance - globeRadius, 0.00016);
+  const zoomScale = THREE.MathUtils.clamp(
+    Math.pow(surfaceDistance / (6.2 - globeRadius), 1.25),
+    0.0018,
+    1
+  );
+
+  return direction * Math.abs(delta) * zoomScale;
+}
+
+function shouldShowTerrainLayer(distance: number) {
+  return distance <= 2.78;
+}
+
+function getSatelliteTilePlan(camera: THREE.PerspectiveCamera): SatelliteTilePlan | null {
+  const distance = camera.position.length();
+
+  if (distance > 6.25) {
+    return null;
+  }
+
+  const surfaceDistance = Math.max(distance - globeRadius, 0.00006);
+  const halfViewportWidth =
+    surfaceDistance *
+    Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) *
+    Math.max(camera.aspect, 1);
+  const visibleDegrees = Math.max(
+    0.001,
+    THREE.MathUtils.radToDeg(2 * Math.atan(halfViewportWidth / globeRadius)) * 1.45
+  );
+  const targetTilesAcross = 4;
+  const targetTileDegrees = visibleDegrees / targetTilesAcross;
+  const zoom = THREE.MathUtils.clamp(
+    Math.floor(Math.log2(360 / targetTileDegrees)),
+    3,
+    19
+  );
+
+  return { zoom, radius: 2 };
+}
+
+type XyzTile = {
+  x: number;
+  y: number;
+  z: number;
+};
+
+function latLngToXyzTile(latitude: number, longitude: number, zoom: number): XyzTile {
+  const clampedLatitude = THREE.MathUtils.clamp(latitude, -85.05112878, 85.05112878);
+  const latRad = THREE.MathUtils.degToRad(clampedLatitude);
+  const tileCount = 2 ** zoom;
+  const x = Math.floor(((normalizeLongitude(longitude) + 180) / 360) * tileCount);
+  const y = Math.floor(
+    ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) *
+      tileCount
+  );
+
+  return {
+    x: wrapTileX(x, tileCount),
+    y: THREE.MathUtils.clamp(y, 0, tileCount - 1),
+    z: zoom
+  };
+}
+
+async function loadSatelliteTileSet(
+  centerTile: XyzTile,
+  radius: number,
+  textureCache: Map<string, THREE.Texture>,
+  urlTemplate: string,
+  anisotropy: number,
+  terrainFeatures: TerrainFeature[]
+) {
+  const group = new THREE.Group();
+  group.name = `satellite-tiles-z${centerTile.z}`;
+  const loadedTiles = await loadSatelliteTileTextures(
+    centerTile,
+    radius,
+    textureCache,
+    urlTemplate,
+    anisotropy
+  );
+
+  if (loadedTiles.length === 0) {
+    throw new Error("No satellite tiles loaded");
+  }
+
+  const meshes = loadedTiles.map(({ tile, texture }) =>
+    createSatelliteTileMesh(tile, texture, terrainFeatures)
+  );
+  group.add(...meshes);
+
+  return group;
+}
+
+function createSatelliteTileList(centerTile: XyzTile, radius: number) {
+  const tileCount = 2 ** centerTile.z;
+  const tiles: XyzTile[] = [];
+
+  for (let yOffset = -radius; yOffset <= radius; yOffset += 1) {
+    for (let xOffset = -radius; xOffset <= radius; xOffset += 1) {
+      const y = centerTile.y + yOffset;
+
+      if (y < 0 || y >= tileCount) {
+        continue;
+      }
+
+      tiles.push({
+        z: centerTile.z,
+        x: wrapTileX(centerTile.x + xOffset, tileCount),
+        y
+      });
+    }
+  }
+
+  return tiles;
+}
+
+async function loadSatelliteTileTextures(
+  centerTile: XyzTile,
+  radius: number,
+  textureCache: Map<string, THREE.Texture>,
+  urlTemplate: string,
+  anisotropy: number
+) {
+  const loadedTiles = await Promise.all(
+    createSatelliteTileList(centerTile, radius).map(async (tile) => {
+      try {
+        const texture = await loadTileTexture(
+          getTileUrl(urlTemplate, tile),
+          textureCache,
+          anisotropy
+        );
+
+        return { tile, texture };
+      } catch {
+        return null;
+      }
+    })
+  );
+  const tiles: LoadedSatelliteTile[] = [];
+
+  for (const loadedTile of loadedTiles) {
+    if (loadedTile) {
+      tiles.push(loadedTile);
+    }
+  }
+
+  return tiles;
+}
+
+async function prefetchSatelliteTileLevels(
+  focus: SurfaceFocus,
+  currentPlan: SatelliteTilePlan,
+  prefetchedKeys: Set<string>,
+  textureCache: Map<string, THREE.Texture>,
+  urlTemplate: string,
+  anisotropy: number
+) {
+  const plans = [currentPlan.zoom + 1, currentPlan.zoom + 2]
+    .filter((zoom) => zoom <= 19)
+    .map((zoom, index) => ({
+      centerTile: latLngToXyzTile(focus.latitude, focus.longitude, zoom),
+      radius: index === 0 ? 2 : 1
+    }));
+
+  for (const plan of plans) {
+    const key = `prefetch:${plan.centerTile.z}:${plan.centerTile.x}:${plan.centerTile.y}:${plan.radius}`;
+
+    if (prefetchedKeys.has(key)) {
+      continue;
+    }
+
+    prefetchedKeys.add(key);
+
+    try {
+      await loadSatelliteTileTextures(
+        plan.centerTile,
+        plan.radius,
+        textureCache,
+        urlTemplate,
+        anisotropy
+      );
+    } catch {
+      prefetchedKeys.delete(key);
+    }
+  }
+}
+
+async function loadTileTexture(
+  url: string,
+  textureCache: Map<string, THREE.Texture>,
+  anisotropy: number
+) {
+  const cachedTexture = textureCache.get(url);
+
+  if (cachedTexture) {
+    return cachedTexture;
+  }
+
+  const loader = new THREE.TextureLoader();
+  loader.setCrossOrigin("anonymous");
+  const texture = await loader.loadAsync(url);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = true;
+  texture.anisotropy = anisotropy;
+  textureCache.set(url, texture);
+
+  return texture;
+}
+
+function createSatelliteTileMesh(
+  tile: XyzTile,
+  texture: THREE.Texture,
+  terrainFeatures: TerrainFeature[]
+) {
+  const bounds = xyzTileBounds(tile);
+  const geometry = createTilePatchGeometry(
+    bounds,
+    tile.z >= 12 ? 32 : 18,
+    globeRadius + satelliteTileOffset,
+    tile.z,
+    terrainFeatures
+  );
+  const material = new THREE.MeshStandardMaterial({
+    map: texture,
+    metalness: 0,
+    roughness: 0.88,
+    transparent: false,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -4,
+    polygonOffsetUnits: -4
+  });
+
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.renderOrder = 4;
+
+  return mesh;
+}
+
+function createTilePatchGeometry(
+  bounds: { north: number; south: number; west: number; east: number },
+  segments: number,
+  radius: number,
+  zoom: number,
+  terrainFeatures: TerrainFeature[]
+) {
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  for (let row = 0; row <= segments; row += 1) {
+    const v = row / segments;
+    const latitude = bounds.north + (bounds.south - bounds.north) * v;
+
+    for (let column = 0; column <= segments; column += 1) {
+      const u = column / segments;
+      const longitude = bounds.west + (bounds.east - bounds.west) * u;
+      const terrainElevation = getTerrainElevationAt(
+        latitude,
+        longitude,
+        terrainFeatures,
+        zoom
+      );
+      const position = latLngToVector3(
+        latitude,
+        longitude,
+        radius + terrainElevation
+      );
+
+      positions.push(position.x, position.y, position.z);
+      uvs.push(u, 1 - v);
+    }
+  }
+
+  for (let row = 0; row < segments; row += 1) {
+    for (let column = 0; column < segments; column += 1) {
+      const a = row * (segments + 1) + column;
+      const b = a + 1;
+      const c = a + segments + 1;
+      const d = c + 1;
+
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+
+  return geometry;
+}
+
+function getTerrainElevationAt(
+  latitude: number,
+  longitude: number,
+  terrainFeatures: TerrainFeature[],
+  zoom: number
+) {
+  if (zoom < 8) {
+    return 0;
+  }
+
+  const zoomFade = THREE.MathUtils.clamp((zoom - 8) / 4, 0, 1);
+  let elevation = 0;
+
+  for (const feature of terrainFeatures) {
+    if (feature.kind === "forest" || feature.kind === "river") {
+      continue;
+    }
+
+    const distance = distanceToTerrainFeatureDegrees(latitude, longitude, feature);
+    const width = getReliefWidthDegrees(feature.kind, feature.intensity);
+
+    if (distance > width * 2.6) {
+      continue;
+    }
+
+    const ridgeProfile = Math.exp(-Math.pow(distance / width, 2) * 2.35);
+    elevation += getReliefHeight(feature.kind, feature.intensity) * ridgeProfile;
+  }
+
+  return THREE.MathUtils.clamp(elevation * zoomFade, 0, 0.07);
+}
+
+function distanceToTerrainFeatureDegrees(
+  latitude: number,
+  longitude: number,
+  feature: Extract<TerrainFeature, { kind: "river" | "ridge" | "cliff" | "highland" }>
+) {
+  let closest = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < feature.coordinates.length - 1; index += 1) {
+    const start = feature.coordinates[index];
+    const end = feature.coordinates[index + 1];
+    closest = Math.min(
+      closest,
+      distanceToTerrainSegmentDegrees(latitude, longitude, start, end)
+    );
+  }
+
+  return closest;
+}
+
+function distanceToTerrainSegmentDegrees(
+  latitude: number,
+  longitude: number,
+  start: SurfaceFocus,
+  end: SurfaceFocus
+) {
+  const referenceLatitude = (start.latitude + end.latitude + latitude) / 3;
+  const longitudeScale = Math.max(
+    Math.cos(THREE.MathUtils.degToRad(referenceLatitude)),
+    0.22
+  );
+  const segmentX = longitudeDelta(end.longitude, start.longitude) * longitudeScale;
+  const segmentY = end.latitude - start.latitude;
+  const pointX = longitudeDelta(longitude, start.longitude) * longitudeScale;
+  const pointY = latitude - start.latitude;
+  const segmentLengthSq = segmentX * segmentX + segmentY * segmentY;
+  const t =
+    segmentLengthSq === 0
+      ? 0
+      : THREE.MathUtils.clamp(
+          (pointX * segmentX + pointY * segmentY) / segmentLengthSq,
+          0,
+          1
+        );
+  const closestX = segmentX * t;
+  const closestY = segmentY * t;
+
+  return Math.hypot(pointX - closestX, pointY - closestY);
+}
+
+function xyzTileBounds(tile: XyzTile) {
+  const tileCount = 2 ** tile.z;
+  const west = (tile.x / tileCount) * 360 - 180;
+  const east = ((tile.x + 1) / tileCount) * 360 - 180;
+  const north = mercatorTileYToLatitude(tile.y, tileCount);
+  const south = mercatorTileYToLatitude(tile.y + 1, tileCount);
+
+  return { north, south, west, east };
+}
+
+function mercatorTileYToLatitude(y: number, tileCount: number) {
+  return THREE.MathUtils.radToDeg(Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / tileCount))));
+}
+
+function getTileUrl(urlTemplate: string, tile: XyzTile) {
+  return urlTemplate
+    .replaceAll("{z}", tile.z.toString())
+    .replaceAll("{x}", tile.x.toString())
+    .replaceAll("{y}", tile.y.toString());
+}
+
+function wrapTileX(x: number, tileCount: number) {
+  return ((x % tileCount) + tileCount) % tileCount;
+}
+
 function getDetailTileKey(focus: SurfaceFocus, level: ZoomRenderLevel) {
   const cellSize = level === "local" ? 0.55 : 1.6;
   const latCell = Math.round(focus.latitude / cellSize);
@@ -658,9 +1268,9 @@ function createZoomDetailTile(focus: SurfaceFocus, level: ZoomRenderLevel) {
     group.add(
       createSurfacePolyline(
         coordinates,
-        0x38d9ff,
+        0x0b3d75,
         local ? 0.0016 : 0.0032,
-        0.76,
+        0.86,
         0.082
       )
     );
@@ -752,22 +1362,20 @@ function createDetailForestDot(
 }
 
 function createDetailPeak(latitude: number, longitude: number, kind: TerrainKind) {
-  const isCliff = kind === "cliff";
-  const geometry = new THREE.ConeGeometry(
-    isCliff ? 0.008 : 0.006,
-    isCliff ? 0.032 : 0.024,
-    5
-  );
-  const material = new THREE.MeshStandardMaterial({
-    color: isCliff ? 0xffb35d : 0xf5e3a4,
-    emissive: isCliff ? 0x381700 : 0x2e2608,
-    emissiveIntensity: 0.24,
-    roughness: 0.82
-  });
-  const peak = new THREE.Mesh(geometry, material);
-  placeOnGlobeSurface(peak, latitude, longitude, isCliff ? 0.046 : 0.04, "y");
+  const bend = kind === "cliff" ? 0.09 : 0.06;
+  const coordinates = [
+    {
+      latitude: clampLatitude(latitude - bend * 0.7),
+      longitude: normalizeLongitude(longitude - bend)
+    },
+    { latitude, longitude },
+    {
+      latitude: clampLatitude(latitude + bend * 0.7),
+      longitude: normalizeLongitude(longitude + bend)
+    }
+  ];
 
-  return peak;
+  return createRaisedTerrainRibbon(coordinates, kind, kind === "cliff" ? 2 : 1, 0.38);
 }
 
 function createTerrainLayer(features: TerrainFeature[]) {
@@ -839,10 +1447,20 @@ function createForestPatch(feature: Extract<TerrainFeature, { kind: "forest" }>)
 function createLinearTerrain(
   feature: Extract<TerrainFeature, { kind: "river" | "ridge" | "cliff" | "highland" }>
 ) {
+  if (feature.kind === "river") {
+    return createRiverTerrain(feature);
+  }
+
+  return createReliefTerrain(feature);
+}
+
+function createRiverTerrain(
+  feature: Extract<TerrainFeature, { kind: "river" | "ridge" | "cliff" | "highland" }>
+) {
   const group = new THREE.Group();
   const color = terrainColor(feature.kind);
   const radius = terrainTubeRadius(feature.kind, feature.intensity);
-  const altitude = feature.kind === "river" ? 0.032 : 0.052;
+  const altitude = 0.014;
   const points = feature.coordinates.map((coordinate) =>
     latLngToVector3(coordinate.latitude, coordinate.longitude, globeRadius + altitude)
   );
@@ -857,7 +1475,7 @@ function createLinearTerrain(
   const material = new THREE.MeshBasicMaterial({
     color,
     transparent: true,
-    opacity: feature.kind === "river" ? 0.86 : 0.78,
+    opacity: 0.92,
     depthWrite: false
   });
 
@@ -865,17 +1483,103 @@ function createLinearTerrain(
   tube.name = feature.name;
   group.add(tube);
 
-  if (feature.kind !== "river") {
-    feature.coordinates.forEach((coordinate, index) => {
-      if (index % 2 === 1 && feature.coordinates.length > 3) {
-        return;
-      }
+  return group;
+}
 
-      group.add(createTerrainPeak(coordinate.latitude, coordinate.longitude, feature.kind));
-    });
-  }
+function createReliefTerrain(
+  feature: Extract<TerrainFeature, { kind: "river" | "ridge" | "cliff" | "highland" }>
+) {
+  const group = new THREE.Group();
+  const relief = createRaisedTerrainRibbon(
+    feature.coordinates,
+    feature.kind,
+    feature.intensity,
+    0.45
+  );
+  relief.name = feature.name;
+  group.add(relief);
 
   return group;
+}
+
+function createRaisedTerrainRibbon(
+  coordinates: SurfaceFocus[],
+  kind: TerrainKind,
+  intensity: 1 | 2 | 3,
+  opacity: number
+) {
+  const normals = coordinates.map((coordinate) =>
+    latLngToVector3(coordinate.latitude, coordinate.longitude, 1).normalize()
+  );
+  const curve = new THREE.CatmullRomCurve3(normals);
+  const alongSegments = Math.max(coordinates.length * 24, 48);
+  const crossSegments = 8;
+  const width = degreesToSurfaceUnits(getReliefWidthDegrees(kind, intensity));
+  const height = getReliefHeight(kind, intensity);
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  for (let row = 0; row <= alongSegments; row += 1) {
+    const v = row / alongSegments;
+    const normal = curve.getPoint(v).normalize();
+    const tangent = curve.getTangent(v).normalize();
+    let side = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+
+    if (side.lengthSq() < 0.0001) {
+      side = new THREE.Vector3(0, 1, 0).cross(normal).normalize();
+    }
+
+    const lengthModulation = 0.88 + Math.sin(v * Math.PI * 5.5) * 0.08;
+
+    for (let column = 0; column <= crossSegments; column += 1) {
+      const u = column / crossSegments;
+      const lateral = (u - 0.5) * 2;
+      const ridgeProfile = Math.exp(-Math.pow(lateral * 2.05, 2));
+      const base = normal
+        .clone()
+        .multiplyScalar(globeRadius)
+        .add(side.clone().multiplyScalar(lateral * width));
+      const surfaceNormal = base.normalize();
+      const position = surfaceNormal.multiplyScalar(
+        globeRadius + 0.006 + height * ridgeProfile * lengthModulation
+      );
+
+      positions.push(position.x, position.y, position.z);
+      uvs.push(u, v);
+    }
+  }
+
+  for (let row = 0; row < alongSegments; row += 1) {
+    for (let column = 0; column < crossSegments; column += 1) {
+      const a = row * (crossSegments + 1) + column;
+      const b = a + 1;
+      const c = a + crossSegments + 1;
+      const d = c + 1;
+
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+
+  const material = new THREE.MeshStandardMaterial({
+    color: kind === "cliff" ? 0xc48a52 : 0xb8b3a4,
+    metalness: 0,
+    opacity,
+    roughness: 0.94,
+    side: THREE.DoubleSide,
+    transparent: true,
+    depthWrite: false
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.renderOrder = 5;
+
+  return mesh;
 }
 
 function createCirclePoints(segments: number) {
@@ -884,25 +1588,6 @@ function createCirclePoints(segments: number) {
 
     return new THREE.Vector3(Math.cos(angle), Math.sin(angle), 0);
   });
-}
-
-function createTerrainPeak(latitude: number, longitude: number, kind: TerrainKind) {
-  const isCliff = kind === "cliff";
-  const geometry = new THREE.ConeGeometry(
-    isCliff ? 0.026 : 0.022,
-    isCliff ? 0.11 : 0.085,
-    5
-  );
-  const material = new THREE.MeshStandardMaterial({
-    color: isCliff ? 0xffa947 : 0xf8e8b0,
-    emissive: isCliff ? 0x4d1f00 : 0x3a2f0b,
-    emissiveIntensity: 0.28,
-    roughness: 0.8
-  });
-  const peak = new THREE.Mesh(geometry, material);
-  placeOnGlobeSurface(peak, latitude, longitude, isCliff ? 0.075 : 0.064, "y");
-
-  return peak;
 }
 
 function placeOnGlobeSurface(
@@ -925,7 +1610,7 @@ function degreesToSurfaceUnits(degrees: number) {
 
 function terrainColor(kind: TerrainKind) {
   if (kind === "river") {
-    return 0x38d9ff;
+    return 0x0b3d75;
   }
 
   if (kind === "cliff") {
@@ -940,13 +1625,45 @@ function terrainColor(kind: TerrainKind) {
 }
 
 function terrainTubeRadius(kind: TerrainKind, intensity: 1 | 2 | 3) {
-  const base = kind === "river" ? 0.009 : 0.0065;
+  if (kind === "river") {
+    return 0.012;
+  }
+
+  const base = 0.0065;
 
   return base + intensity * 0.0035;
 }
 
+function getReliefWidthDegrees(kind: TerrainKind, intensity: 1 | 2 | 3) {
+  if (kind === "cliff") {
+    return 0.12 + intensity * 0.06;
+  }
+
+  if (kind === "highland") {
+    return 0.22 + intensity * 0.1;
+  }
+
+  return 0.16 + intensity * 0.08;
+}
+
+function getReliefHeight(kind: TerrainKind, intensity: 1 | 2 | 3) {
+  if (kind === "cliff") {
+    return 0.018 + intensity * 0.008;
+  }
+
+  if (kind === "highland") {
+    return 0.012 + intensity * 0.006;
+  }
+
+  return 0.014 + intensity * 0.007;
+}
+
 function normalizeLongitude(longitude: number) {
   return ((((longitude + 180) % 360) + 360) % 360) - 180;
+}
+
+function longitudeDelta(longitude: number, origin: number) {
+  return normalizeLongitude(longitude - origin);
 }
 
 function clampLatitude(latitude: number) {
@@ -977,12 +1694,24 @@ function createSeededRandom(seed: number) {
   };
 }
 
-function zoomRenderLabel(level: ZoomRenderLevel) {
-  if (level === "local") {
+function zoomRenderLabel(state: ZoomRenderState) {
+  if (state.satelliteStatus === "ready" && state.satelliteZoom) {
+    return `Satellit Z${state.satelliteZoom} geladen`;
+  }
+
+  if (state.satelliteStatus === "loading" && state.satelliteZoom) {
+    return `Satellit Z${state.satelliteZoom} wird geladen`;
+  }
+
+  if (state.satelliteStatus === "error") {
+    return "Satellitenkacheln nicht verfügbar";
+  }
+
+  if (state.level === "local") {
     return "Lokaldetails nachgeladen";
   }
 
-  if (level === "regional") {
+  if (state.level === "regional") {
     return "Region nachgeladen";
   }
 
