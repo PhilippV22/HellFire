@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import Image from "next/image";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { EarthGlobe } from "@/components/EarthGlobe";
-import { mockEvents, mockInfrastructure } from "@/data/mockEvents";
 import { mockTerrainFeatures } from "@/data/mockTerrain";
+import { hellfireBrandAssets } from "@/lib/brandAssets";
 import { categoryMeta, infrastructureLabels } from "@/lib/eventMeta";
 import { filterEvents, formatConfidence, formatDateTime } from "@/lib/filters";
 import { getNearbyInfrastructure } from "@/lib/infrastructure";
@@ -11,9 +12,17 @@ import {
   eventCategories,
   type CrisisEvent,
   type EventCategory,
+  type EventDetail,
   type EventFilters,
-  type InfrastructureAsset
+  type InfrastructureAsset,
+  type TimelineBucket
 } from "@/types/events";
+
+type ApiListResponse<T> = {
+  data: T;
+  source?: "production" | "production-live";
+  warning?: string;
+};
 
 const initialFilters: EventFilters = {
   categories: [...eventCategories],
@@ -22,21 +31,108 @@ const initialFilters: EventFilters = {
 };
 
 export function EarthSituationMonitor() {
+  const [events, setEvents] = useState<CrisisEvent[]>([]);
+  const [infrastructure, setInfrastructure] =
+    useState<InfrastructureAsset[]>([]);
+  const [timeline, setTimeline] = useState<TimelineBucket[]>([]);
   const [filters, setFilters] = useState<EventFilters>(initialFilters);
-  const [selectedEventId, setSelectedEventId] = useState(mockEvents[0]?.id ?? "");
+  const [selectedEventId, setSelectedEventId] = useState("");
+  const [selectedDetail, setSelectedDetail] = useState<EventDetail | null>(null);
+  const [dataMode, setDataMode] = useState<"production">("production");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [warning, setWarning] = useState("");
+
+  const loadDashboard = useCallback(async () => {
+    setLoading(true);
+
+    try {
+      const [eventResponse, infrastructureResponse, timelineResponse] =
+        await Promise.all([
+          fetch("/api/events", { cache: "no-store" }),
+          fetch("/api/infrastructure", { cache: "no-store" }),
+          fetch("/api/timeline", { cache: "no-store" })
+        ]);
+      const eventPayload =
+        (await eventResponse.json()) as ApiListResponse<CrisisEvent[]>;
+      const infrastructurePayload =
+        (await infrastructureResponse.json()) as ApiListResponse<InfrastructureAsset[]>;
+      const timelinePayload =
+        (await timelineResponse.json()) as ApiListResponse<TimelineBucket[]>;
+
+      setEvents(eventPayload.data ?? []);
+      setInfrastructure(infrastructurePayload.data ?? []);
+      setTimeline(timelinePayload.data ?? []);
+      setDataMode("production");
+      setWarning(
+        eventPayload.warning ||
+          infrastructurePayload.warning ||
+          timelinePayload.warning ||
+          ""
+      );
+    } catch (error) {
+      setEvents([]);
+      setInfrastructure([]);
+      setTimeline([]);
+      setDataMode("production");
+      setWarning(error instanceof Error ? error.message : "API nicht erreichbar");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => void loadDashboard(), 0);
+
+    return () => window.clearTimeout(timeout);
+  }, [loadDashboard]);
 
   const filteredEvents = useMemo(
-    () => filterEvents(mockEvents, filters),
-    [filters]
+    () => filterEvents(events, filters),
+    [events, filters]
   );
 
   const selectedEvent = useMemo(() => {
     return (
       filteredEvents.find((event) => event.id === selectedEventId) ??
       filteredEvents[0] ??
-      mockEvents[0]
+      events[0]
     );
-  }, [filteredEvents, selectedEventId]);
+  }, [events, filteredEvents, selectedEventId]);
+
+  useEffect(() => {
+    if (!selectedEvent) {
+      const timeout = window.setTimeout(() => setSelectedDetail(null), 0);
+
+      return () => window.clearTimeout(timeout);
+    }
+
+    let cancelled = false;
+    const selectedEventIdForDetail = selectedEvent.id;
+
+    async function loadDetail() {
+      try {
+        const response = await fetch(`/api/events/${selectedEventIdForDetail}`, {
+          cache: "no-store"
+        });
+        const payload = (await response.json()) as ApiListResponse<EventDetail>;
+
+        if (!cancelled) {
+          setSelectedDetail(payload.data ?? null);
+        }
+      } catch {
+        if (!cancelled) {
+          setSelectedDetail(null);
+        }
+      }
+    }
+
+    void loadDetail();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedEvent]);
 
   function selectEvent(event: CrisisEvent) {
     setSelectedEventId(event.id);
@@ -53,8 +149,42 @@ export function EarthSituationMonitor() {
     });
   }
 
+  async function runIngestRefresh() {
+    setRefreshing(true);
+
+    try {
+      await Promise.all([
+        fetch("/api/ingest/gdelt", { method: "POST" }),
+        fetch("/api/ingest/gdelt-doc", { method: "POST" }),
+        fetch("/api/ingest/reliefweb", { method: "POST" }),
+        fetch("/api/ingest/usgs", { method: "POST" }),
+        fetch("/api/ingest/emsc", { method: "POST" }),
+        fetch("/api/ingest/gdacs", { method: "POST" }),
+        fetch("/api/ingest/eonet", { method: "POST" }),
+        fetch("/api/ingest/rss", { method: "POST" })
+      ]);
+      await loadDashboard();
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  const regionOptions = useMemo(() => {
+    const regions = new Set<string>();
+
+    for (const event of events) {
+      const region = event.region || event.country || event.locationName;
+
+      if (region) {
+        regions.add(region);
+      }
+    }
+
+    return Array.from(regions).sort((a, b) => a.localeCompare(b));
+  }, [events]);
+
   return (
-    <main className="relative h-dvh min-h-[680px] overflow-hidden bg-black text-slate-100">
+    <main className="relative h-dvh min-h-[720px] overflow-hidden bg-black text-slate-100">
       <EarthGlobe
         events={filteredEvents}
         terrainFeatures={mockTerrainFeatures}
@@ -63,24 +193,37 @@ export function EarthSituationMonitor() {
       />
 
       <div className="pointer-events-none absolute inset-x-0 top-0 z-20 p-3 sm:p-4">
-        <div className="pointer-events-auto flex w-fit max-w-full items-center gap-3 rounded-md border border-white/10 bg-slate-950/80 px-3 py-2 shadow-2xl backdrop-blur-md">
-          <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-300">
-              HellFire
-            </p>
-            <h1 className="text-sm font-semibold text-white sm:text-base">
-              Civil Earth Monitor
-            </h1>
-          </div>
-          <div className="h-9 w-px bg-white/10" />
+        <div className="pointer-events-auto flex w-fit max-w-full items-center gap-3 rounded-md border border-white/10 bg-slate-950/82 px-3 py-2 shadow-2xl backdrop-blur-md">
+          <Image
+            src={hellfireBrandAssets.logos.horizontalLockupDark}
+            alt="HellFire"
+            width={470}
+            height={123}
+            priority
+            className="h-12 w-auto max-w-[220px] object-contain"
+          />
+          <div className="hidden h-9 w-px bg-white/10 sm:block" />
           <div className="grid grid-cols-2 gap-2 text-xs">
             <Metric label="Events" value={filteredEvents.length.toString()} />
-            <Metric label="Mode" value="Mock" />
+            <Metric label="Mode" value={loading ? "Load" : dataMode.toUpperCase()} />
           </div>
+          <button
+            type="button"
+            className="hidden rounded-md border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:border-cyan-200 sm:block"
+            onClick={() => void runIngestRefresh()}
+            disabled={refreshing}
+          >
+            {refreshing ? "Sync..." : "Sync"}
+          </button>
         </div>
+        {warning ? (
+          <p className="pointer-events-auto mt-2 w-fit rounded-md border border-amber-300/25 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
+            {warning}
+          </p>
+        ) : null}
       </div>
 
-      <aside className="pointer-events-auto absolute bottom-4 left-4 top-24 z-20 hidden w-[340px] flex-col rounded-md border border-white/10 bg-slate-950/80 shadow-2xl backdrop-blur-md lg:flex">
+      <aside className="pointer-events-auto absolute bottom-4 left-4 top-24 z-20 hidden w-[350px] flex-col rounded-md border border-white/10 bg-slate-950/82 shadow-2xl backdrop-blur-md lg:flex">
         <EventFeed
           events={filteredEvents}
           selectedEventId={selectedEvent?.id}
@@ -88,23 +231,27 @@ export function EarthSituationMonitor() {
         />
       </aside>
 
-      <aside className="pointer-events-auto absolute bottom-4 right-4 top-4 z-20 hidden w-[390px] rounded-md border border-white/10 bg-slate-950/80 shadow-2xl backdrop-blur-md xl:block">
-        <EventIntel event={selectedEvent} infrastructure={mockInfrastructure} />
+      <aside className="pointer-events-auto absolute bottom-4 right-4 top-4 z-20 hidden w-[410px] rounded-md border border-white/10 bg-slate-950/82 shadow-2xl backdrop-blur-md xl:block">
+        <EventIntel
+          event={selectedDetail ?? selectedEvent}
+          infrastructure={infrastructure}
+        />
       </aside>
 
-      <section className="pointer-events-auto absolute bottom-4 left-1/2 z-20 hidden w-[560px] max-w-[calc(100vw-780px)] -translate-x-1/2 rounded-md border border-white/10 bg-slate-950/80 p-3 shadow-2xl backdrop-blur-md xl:block">
-        <TerrainLegend />
+      <section className="pointer-events-auto absolute bottom-4 left-1/2 z-20 hidden w-[620px] max-w-[calc(100vw-820px)] -translate-x-1/2 rounded-md border border-white/10 bg-slate-950/82 p-3 shadow-2xl backdrop-blur-md xl:block">
+        <TimelinePanel timeline={timeline} />
         <EarthFilters
           filters={filters}
+          regionOptions={regionOptions}
           onCategoryChange={updateCategory}
           onFiltersChange={setFilters}
         />
       </section>
 
-      <section className="pointer-events-auto absolute inset-x-3 bottom-3 z-30 max-h-[46vh] overflow-y-auto rounded-md border border-white/10 bg-slate-950/90 p-3 shadow-2xl backdrop-blur-md xl:hidden">
-        <TerrainLegend />
+      <section className="pointer-events-auto absolute inset-x-3 bottom-3 z-30 max-h-[52vh] overflow-y-auto rounded-md border border-white/10 bg-slate-950/94 p-3 shadow-2xl backdrop-blur-md xl:hidden">
         <EarthFilters
           filters={filters}
+          regionOptions={regionOptions}
           onCategoryChange={updateCategory}
           onFiltersChange={setFilters}
         />
@@ -116,7 +263,11 @@ export function EarthSituationMonitor() {
           />
         </div>
         <div className="mt-3 border-t border-white/10 pt-3">
-          <EventIntel event={selectedEvent} infrastructure={mockInfrastructure} compact />
+          <EventIntel
+            event={selectedDetail ?? selectedEvent}
+            infrastructure={infrastructure}
+            compact
+          />
         </div>
       </section>
     </main>
@@ -134,29 +285,6 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function TerrainLegend() {
-  const items = [
-    { label: "Wald", className: "bg-emerald-400/70" },
-    { label: "Fluss", className: "bg-sky-300" },
-    { label: "Berg", className: "bg-amber-200" },
-    { label: "Klippe", className: "bg-orange-300" }
-  ];
-
-  return (
-    <div className="mb-3 grid grid-cols-4 gap-1.5">
-      {items.map((item) => (
-        <div
-          key={item.label}
-          className="flex min-h-8 items-center gap-2 rounded-md border border-white/10 bg-white/5 px-2 text-[11px] text-slate-300"
-        >
-          <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${item.className}`} />
-          <span className="truncate">{item.label}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function EventFeed({
   events,
   selectedEventId,
@@ -170,7 +298,7 @@ function EventFeed({
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
         <h2 className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-300">
-          Lagepunkte
+          Event Feed
         </h2>
         <span className="rounded-md bg-white/5 px-2 py-1 text-xs text-slate-300">
           {events.length}
@@ -207,14 +335,14 @@ function MobileEventStrip({
         <button
           key={event.id}
           type="button"
-          className={`flex min-w-[220px] items-center gap-2 rounded-md border px-3 py-2 text-left ${
+          className={`flex min-w-[230px] items-center gap-2 rounded-md border px-3 py-2 text-left ${
             event.id === selectedEventId
               ? "border-cyan-300 bg-cyan-300/10"
               : "border-white/10 bg-white/5"
           }`}
           onClick={() => onSelectEvent(event)}
         >
-          <span className="text-lg">{categoryMeta[event.category].icon}</span>
+          <CategoryVisual category={event.category} className="h-7 w-7" />
           <span className="min-w-0">
             <span className="block truncate text-xs font-semibold text-white">
               {event.title}
@@ -251,10 +379,9 @@ function EventButton({
       onClick={() => onSelectEvent(event)}
     >
       <span className="flex items-start gap-3">
-        <span
-          className="mt-0.5 h-3 w-3 shrink-0 rounded-full ring-4 ring-white/10"
-          style={{ backgroundColor: meta.markerColor }}
-        />
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-white/10 bg-black/35">
+          <CategoryVisual category={event.category} className="h-7 w-7" />
+        </span>
         <span className="min-w-0 flex-1">
           <span className="block text-sm font-semibold text-white">
             {event.title}
@@ -265,7 +392,7 @@ function EventButton({
           <span className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-slate-400">
             <span>Severity {event.severity}</span>
             <span>{formatConfidence(event.confidence)}</span>
-            <span className="truncate">{categoryMeta[event.category].label}</span>
+            <span className="truncate">{meta.label}</span>
           </span>
         </span>
       </span>
@@ -275,16 +402,18 @@ function EventButton({
 
 function EarthFilters({
   filters,
+  regionOptions,
   onCategoryChange,
   onFiltersChange
 }: {
   filters: EventFilters;
+  regionOptions: string[];
   onCategoryChange: (category: EventCategory) => void;
   onFiltersChange: (filters: EventFilters) => void;
 }) {
   return (
-    <div>
-      <div className="grid grid-cols-9 gap-1.5">
+    <div className="mt-3 border-t border-white/10 pt-3">
+      <div className="grid grid-cols-7 gap-1.5">
         {eventCategories.map((category) => {
           const meta = categoryMeta[category];
           const active = filters.categories.includes(category);
@@ -302,13 +431,13 @@ function EarthFilters({
               }`}
               onClick={() => onCategoryChange(category)}
             >
-              <span aria-hidden>{meta.icon}</span>
+              <CategoryVisual category={category} className="h-6 w-6" />
               <span className="sr-only">{meta.label}</span>
             </button>
           );
         })}
       </div>
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+      <div className="mt-3 grid gap-3 sm:grid-cols-3">
         <label className="text-xs text-slate-300">
           <span className="flex items-center justify-between">
             Mindestschwere
@@ -351,6 +480,69 @@ function EarthFilters({
             }
           />
         </label>
+        <label className="text-xs text-slate-300">
+          <span>Region</span>
+          <select
+            className="mt-2 h-8 w-full rounded-md border border-white/10 bg-slate-950 px-2 text-xs text-white"
+            value={filters.region ?? ""}
+            onChange={(event) =>
+              onFiltersChange({
+                ...filters,
+                region: event.target.value || undefined
+              })
+            }
+          >
+            <option value="">Alle Regionen</option>
+            {regionOptions.map((region) => (
+              <option key={region} value={region}>
+                {region}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function TimelinePanel({ timeline }: { timeline: TimelineBucket[] }) {
+  const visible = timeline.slice(0, 8);
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-300">
+          Timeline
+        </h2>
+        <span className="text-[11px] text-slate-500">nach Tag und Kategorie</span>
+      </div>
+      <div className="grid grid-cols-4 gap-1.5">
+        {visible.length === 0 ? (
+          <p className="col-span-4 rounded-md border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-400">
+            Noch keine Timeline-Daten.
+          </p>
+        ) : (
+          visible.map((bucket) => {
+            const meta = categoryMeta[bucket.category];
+
+            return (
+              <div
+                key={`${bucket.day}:${bucket.category}:${bucket.country}:${bucket.region}`}
+                className="rounded-md border border-white/10 bg-white/5 px-2 py-1.5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-slate-400">{bucket.day}</span>
+                  <span className="text-xs" style={{ color: meta.markerColor }}>
+                    {bucket.count}
+                  </span>
+                </div>
+                <p className="mt-1 truncate text-[11px] text-white">
+                  {meta.label} S{bucket.maxSeverity}
+                </p>
+              </div>
+            );
+          })
+        )}
       </div>
     </div>
   );
@@ -361,7 +553,7 @@ function EventIntel({
   infrastructure,
   compact = false
 }: {
-  event?: CrisisEvent;
+  event?: CrisisEvent | EventDetail | null;
   infrastructure: InfrastructureAsset[];
   compact?: boolean;
 }) {
@@ -370,15 +562,19 @@ function EventIntel({
   }
 
   const meta = categoryMeta[event.category];
-  const nearbyInfrastructure = getNearbyInfrastructure(event, infrastructure, 25);
+  const detail = isEventDetail(event) ? event : null;
+  const nearbyInfrastructure =
+    detail?.nearbyInfrastructure ??
+    getNearbyInfrastructure(event, infrastructure, 50).slice(0, compact ? 2 : 5);
+  const rawReports = detail?.rawReports ?? [];
+  const notes = detail?.analysisNotes ?? [];
 
   return (
     <div className={compact ? "" : "h-full overflow-y-auto p-4"}>
       <div className="flex items-start gap-3">
-        <span
-          className="mt-1 h-3 w-3 shrink-0 rounded-full ring-4 ring-white/10"
-          style={{ backgroundColor: meta.markerColor }}
-        />
+        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-white/10 bg-black/35">
+          <CategoryVisual category={event.category} className="h-8 w-8" />
+        </span>
         <div className="min-w-0">
           <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-300">
             {meta.label}
@@ -391,7 +587,10 @@ function EventIntel({
       <div className="mt-4 grid grid-cols-3 gap-2">
         <Metric label="Severity" value={`${event.severity}/5`} />
         <Metric label="Conf." value={formatConfidence(event.confidence)} />
-        <Metric label="Sources" value={event.sources.length.toString()} />
+        <Metric
+          label="Sources"
+          value={(event.sourceCount ?? event.sources.length).toString()}
+        />
       </div>
 
       <section className="mt-4">
@@ -421,15 +620,37 @@ function EventIntel({
 
       <section className="mt-4">
         <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
-          Infrastruktur im Radius
+          Quellen
+        </h3>
+        <div className="mt-2 space-y-2">
+          {event.sources.slice(0, compact ? 2 : 5).map((source) => (
+            <div
+              key={`${source.name}:${source.reportId ?? source.url ?? source.note}`}
+              className="rounded-md border border-white/10 bg-white/5 p-3"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <p className="text-sm font-medium text-white">{source.name}</p>
+                <span className="shrink-0 rounded bg-white/10 px-1.5 py-0.5 text-[10px] uppercase text-slate-300">
+                  {source.type}
+                </span>
+              </div>
+              <p className="mt-1 text-xs leading-5 text-slate-400">{source.note}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="mt-4">
+        <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+          Radius-Infrastruktur
         </h3>
         <div className="mt-2 space-y-2">
           {nearbyInfrastructure.length === 0 ? (
             <p className="rounded-md border border-white/10 bg-white/5 p-3 text-sm text-slate-400">
-              Keine Mock-Infrastruktur im 25-km-Radius.
+              Keine Infrastruktur im 50-km-Radius.
             </p>
           ) : (
-            nearbyInfrastructure.slice(0, compact ? 2 : 4).map((asset) => (
+            nearbyInfrastructure.slice(0, compact ? 2 : 5).map((asset) => (
               <div
                 key={asset.id}
                 className="rounded-md border border-white/10 bg-white/5 p-3"
@@ -443,15 +664,88 @@ function EventIntel({
                       {infrastructureLabels[asset.type]}
                     </p>
                   </div>
-                  <span className="shrink-0 text-xs text-cyan-200">
-                    {asset.distanceKm.toFixed(1)} km
-                  </span>
+                  {"distanceKm" in asset ? (
+                    <span className="shrink-0 text-xs text-cyan-200">
+                      {asset.distanceKm.toFixed(1)} km
+                    </span>
+                  ) : null}
                 </div>
               </div>
             ))
           )}
         </div>
       </section>
+
+      {!compact && rawReports.length > 0 ? (
+        <section className="mt-4">
+          <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+            Rohberichte
+          </h3>
+          <div className="mt-2 space-y-2">
+            {rawReports.slice(0, 4).map((report) => (
+              <div
+                key={report.id}
+                className="rounded-md border border-white/10 bg-white/5 p-3"
+              >
+                <p className="text-sm font-medium text-white">{report.title}</p>
+                <p className="mt-1 text-xs text-slate-400">
+                  {report.sourceName} · {formatConfidence(report.confidence)}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {!compact && notes.length > 0 ? (
+        <section className="mt-4">
+          <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+            Analyse-Notizen
+          </h3>
+          <div className="mt-2 space-y-2">
+            {notes.slice(0, 3).map((note) => (
+              <p
+                key={note.id}
+                className="rounded-md border border-white/10 bg-white/5 p-3 text-xs leading-5 text-slate-300"
+              >
+                {note.body}
+              </p>
+            ))}
+          </div>
+        </section>
+      ) : null}
     </div>
+  );
+}
+
+function isEventDetail(event: CrisisEvent | EventDetail): event is EventDetail {
+  return "rawReports" in event;
+}
+
+function CategoryVisual({
+  category,
+  className
+}: {
+  category: EventCategory;
+  className?: string;
+}) {
+  const meta = categoryMeta[category];
+
+  if (meta.assetPath) {
+    return (
+      <Image
+        src={meta.assetPath}
+        alt=""
+        width={64}
+        height={64}
+        className={`object-contain ${className ?? "h-6 w-6"}`}
+      />
+    );
+  }
+
+  return (
+    <span className={className ?? "text-sm"} aria-hidden>
+      {meta.icon}
+    </span>
   );
 }

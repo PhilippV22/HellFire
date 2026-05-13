@@ -145,7 +145,7 @@ export function MapView({
           Weltkarte
         </p>
         <p className="mt-1 text-sm text-slate-300">
-          Mock-Ereignisse und zivile Infrastruktur
+          Produktionsdaten aus OSINT-Quellen und lokaler Datenbank
         </p>
       </div>
     </div>

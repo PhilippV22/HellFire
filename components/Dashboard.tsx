@@ -5,9 +5,11 @@ import { EventDetailPanel } from "@/components/EventDetailPanel";
 import { EventFeed } from "@/components/EventFeed";
 import { FilterBar } from "@/components/FilterBar";
 import { MapView } from "@/components/MapView";
-import { mockEvents, mockInfrastructure } from "@/data/mockEvents";
+import { localInfrastructure } from "@/data/localInfrastructure";
 import { eventCategories, type CrisisEvent, type EventFilters } from "@/types/events";
 import { filterEvents } from "@/lib/filters";
+
+const productionEvents: CrisisEvent[] = [];
 
 const initialFilters: EventFilters = {
   categories: [...eventCategories],
@@ -17,18 +19,17 @@ const initialFilters: EventFilters = {
 
 export function Dashboard() {
   const [filters, setFilters] = useState<EventFilters>(initialFilters);
-  const [selectedEventId, setSelectedEventId] = useState(mockEvents[0]?.id ?? "");
+  const [selectedEventId, setSelectedEventId] = useState("");
 
   const filteredEvents = useMemo(
-    () => filterEvents(mockEvents, filters),
+    () => filterEvents(productionEvents, filters),
     [filters]
   );
 
   const selectedEvent = useMemo<CrisisEvent | undefined>(() => {
     return (
       filteredEvents.find((event) => event.id === selectedEventId) ??
-      filteredEvents[0] ??
-      mockEvents.find((event) => event.id === selectedEventId)
+      filteredEvents[0]
     );
   }, [filteredEvents, selectedEventId]);
 
@@ -54,7 +55,7 @@ export function Dashboard() {
               label="Max Severity"
               value={(Math.max(...filteredEvents.map((event) => event.severity), 0)).toString()}
             />
-            <StatusMetric label="Mode" value="Mock" />
+            <StatusMetric label="Mode" value="Production" />
           </div>
         </div>
       </header>
@@ -73,7 +74,7 @@ export function Dashboard() {
           <MapView
             events={filteredEvents}
             selectedEvent={selectedEvent}
-            infrastructure={mockInfrastructure}
+            infrastructure={localInfrastructure}
             onSelectEvent={handleSelectEvent}
           />
         </section>
@@ -81,7 +82,7 @@ export function Dashboard() {
         <aside className="border-t border-slate-800 bg-slate-950 xl:border-l xl:border-t-0">
           <EventDetailPanel
             event={selectedEvent}
-            infrastructure={mockInfrastructure}
+            infrastructure={localInfrastructure}
           />
         </aside>
       </section>

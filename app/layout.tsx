@@ -2,8 +2,12 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "HellFire Civil Situation Monitor",
-  description: "MVP for civilian crisis situation awareness with mock data."
+  title: "HellFire",
+  description: "Local civilian OSINT and crisis situation dashboard.",
+  icons: {
+    icon: "/brand/hellfire/app-icons/globe-dark.png",
+    apple: "/brand/hellfire/app-icons/globe-red.png"
+  }
 };
 
 export default function RootLayout({

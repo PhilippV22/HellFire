@@ -103,7 +103,7 @@ export function EventDetailPanel({
         <div className="mt-2 space-y-2">
           {nearbyInfrastructure.length === 0 ? (
             <div className="rounded-md border border-slate-800 bg-slate-900 p-3 text-sm text-slate-400">
-              Keine Mock-Infrastruktur im Radius.
+              Keine Infrastruktur im Radius.
             </div>
           ) : (
             nearbyInfrastructure.map((asset) => (

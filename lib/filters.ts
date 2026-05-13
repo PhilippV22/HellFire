@@ -8,7 +8,11 @@ export function filterEvents(
     return (
       filters.categories.includes(event.category) &&
       event.severity >= filters.minSeverity &&
-      event.confidence >= filters.minConfidence
+      event.confidence >= filters.minConfidence &&
+      (!filters.country || event.country === filters.country) &&
+      (!filters.region ||
+        event.region === filters.region ||
+        event.locationName.toLowerCase().includes(filters.region.toLowerCase()))
     );
   });
 }
