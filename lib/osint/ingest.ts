@@ -1,3 +1,7 @@
+import {
+  conflictKeywordPattern,
+  conflictNewsFeeds
+} from "@/data/conflictNewsFeeds";
 import { publicCrisisRssFeeds } from "@/data/rssFeeds";
 import { normalizeSourcePayload, type SourceId } from "@/lib/osint/normalize";
 import { parseRssItems } from "@/lib/osint/rss";
@@ -27,6 +31,7 @@ export const productionSourceIds = [
   "emsc",
   "gdacs",
   "eonet",
+  "conflict-news",
   "rss"
 ] as const satisfies readonly SourceId[];
 
@@ -81,6 +86,8 @@ async function loadPayload(source: SourceId): Promise<LoadedPayload> {
         return await loadGdacsPayload();
       case "eonet":
         return await loadEonetPayload();
+      case "conflict-news":
+        return await loadConflictNewsPayload();
       case "rss":
         return await loadRssPayload();
     }
@@ -210,6 +217,48 @@ async function loadRssPayload() {
     warning:
       failures.length > 0
         ? `${failures.length} RSS feed(s) konnten nicht geladen werden.`
+        : undefined
+  };
+}
+
+async function loadConflictNewsPayload() {
+  const settled = await Promise.allSettled(
+    conflictNewsFeeds.map(async (feed) => {
+      const xml = await fetchText(new URL(feed.url));
+
+      return parseRssItems(xml, {
+        feedId: feed.id,
+        feedName: feed.name,
+        feedUrl: feed.url,
+        sourceCountry: feed.sourceCountry,
+        sourceLanguage: feed.sourceLanguage,
+        categoryHint: "war conflict missile strike ceasefire invasion refugee humanitarian"
+      }).filter((item) => {
+        const text = [
+          item.title,
+          item.description,
+          item.summary,
+          item["content:encoded"],
+          item.category
+        ]
+          .filter(Boolean)
+          .join(" ");
+
+        return conflictKeywordPattern.test(text);
+      });
+    })
+  );
+
+  const items = settled.flatMap((result) =>
+    result.status === "fulfilled" ? result.value : []
+  );
+  const failures = settled.filter((result) => result.status === "rejected");
+
+  return {
+    payload: items,
+    warning:
+      failures.length > 0
+        ? `${failures.length} conflict-news feed(s) konnten nicht geladen werden.`
         : undefined
   };
 }

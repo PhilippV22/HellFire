@@ -18,7 +18,7 @@ type GlobalWithLiveCache = typeof globalThis & {
 };
 
 const cacheTtlMs = 10 * 60 * 1000;
-const cacheVersion = "production-live-v2";
+const cacheVersion = "production-live-v4-conflict-overlays";
 
 export async function getLiveProductionEvents() {
   const globalWithCache = globalThis as GlobalWithLiveCache;

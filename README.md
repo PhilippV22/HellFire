@@ -10,7 +10,7 @@ HellFire is a local civilian OSINT and crisis situation monitor MVP. It intentio
 - MapLibre GL
 - PostgreSQL and PostGIS preparation
 - PostgreSQL/PostGIS local persistence
-- GDELT, GDELT Doc, ReliefWeb, USGS, EMSC, GDACS, NASA EONET, and RSS production ingestion
+- GDELT, GDELT Doc, ReliefWeb, USGS, EMSC, GDACS, NASA EONET, international conflict-news feeds, and RSS production ingestion
 - Three.js full-screen globe with local NASA Blue Marble satellite imagery
 - Procedural rough-terrain overlays for dense forests, rivers, mountains, cliffs, and highlands
 
@@ -108,6 +108,7 @@ API routes:
 - `POST /api/ingest/emsc`
 - `POST /api/ingest/gdacs`
 - `POST /api/ingest/eonet`
+- `POST /api/ingest/conflict-news`
 - `POST /api/ingest/rss`
 - `GET /api/events`
 - `GET /api/events/:id`
@@ -122,7 +123,9 @@ Worker cadence:
 - GDELT Doc every 15 minutes
 - ReliefWeb every 30 minutes
 - USGS and EMSC every 10 minutes
-- GDACS every 15 minutes
+- GDACS and conflict-news every 15 minutes
 - EONET and RSS every 30 minutes
+
+The conflict-news feed pulls public RSS from Russian, Ukrainian, Israeli, US, UK, German, French, Qatari, and Japanese outlets, filters for war/conflict terms, then merges reports by category, location, date, and title similarity.
 
 Source references: [GDELT Cloud API v2](https://docs.gdeltcloud.com/api-reference/v2), [NASA EONET](https://eonet.gsfc.nasa.gov/docs/v3), [GDACS RSS](https://www.gdacs.org/feed_reference.aspx), [EMSC SeismicPortal](https://www.seismicportal.eu/fdsn-wsevent.html), [ReliefWeb API](https://apidoc.reliefweb.int/endpoints), [USGS GeoJSON feed](https://earthquake.usgs.gov/earthquakes/feed/v1.0/geojson.php), [CDC RSS](https://wwwnc.cdc.gov/travel/page/rss).

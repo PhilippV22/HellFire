@@ -118,7 +118,8 @@ function sourceTypeFromId(sourceId: string): CrisisSource["type"] {
     sourceId === "usgs" ||
     sourceId === "gdacs" ||
     sourceId === "eonet" ||
-    sourceId === "emsc"
+    sourceId === "emsc" ||
+    sourceId === "conflict-news"
   ) {
     return sourceId;
   }

@@ -13,6 +13,7 @@ const jobs: WorkerJob[] = [
   { source: "usgs", intervalMs: 10 * 60 * 1000 },
   { source: "emsc", intervalMs: 10 * 60 * 1000 },
   { source: "gdacs", intervalMs: 15 * 60 * 1000 },
+  { source: "conflict-news", intervalMs: 15 * 60 * 1000 },
   { source: "eonet", intervalMs: 30 * 60 * 1000 },
   { source: "rss", intervalMs: 30 * 60 * 1000 }
 ];

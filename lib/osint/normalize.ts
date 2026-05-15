@@ -9,6 +9,7 @@ export type SourceId =
   | "gdacs"
   | "eonet"
   | "emsc"
+  | "conflict-news"
   | "rss";
 
 export type NormalizedReport = Omit<
@@ -27,6 +28,7 @@ const sourceNames: Record<SourceId, string> = {
   gdacs: "GDACS Disaster Alerts",
   eonet: "NASA EONET",
   emsc: "EMSC SeismicPortal",
+  "conflict-news": "International Conflict News",
   rss: "Public Crisis RSS"
 };
 
@@ -308,7 +310,7 @@ function normalizeEonetEvent(item: Record<string, unknown>): NormalizedReport {
 
 function normalizeRssItem(
   item: Record<string, unknown>,
-  sourceId: Extract<SourceId, "gdacs" | "rss">
+  sourceId: Extract<SourceId, "gdacs" | "rss" | "conflict-news">
 ): NormalizedReport {
   const title = stringValue(item.title) || "RSS report";
   const description = stripHtml(stringValue(item.description) || stringValue(item.summary) || title);
@@ -349,6 +351,7 @@ function normalizeRssItem(
     dateString(item.isoDate) ||
     nowIso();
   const feedName = stringValue(item.feedName) || sourceNames[sourceId];
+  const sourceCountry = stringValue(item.sourceCountry);
 
   return {
     sourceId,
@@ -371,12 +374,19 @@ function normalizeRssItem(
     category,
     severity: severityFromRss(category, item, title, description),
     confidence: applyGeocodePenalty(
-      sourceId === "gdacs" ? 0.86 : 0.66,
+      sourceId === "gdacs" ? 0.86 : sourceId === "conflict-news" ? 0.68 : 0.66,
       location?.confidence
     ),
     geocodeConfidence: location?.confidence ?? 0.25,
     rawPayload: item,
-    normalizedPayload: { title, category, source: sourceId, feedName }
+    normalizedPayload: {
+      title,
+      category,
+      source: sourceId,
+      feedName,
+      sourceCountry,
+      sourceLanguage: stringValue(item.sourceLanguage)
+    }
   };
 }
 
@@ -414,13 +424,13 @@ function classifyCategory(parts: string[]): EventCategory {
   const text = parts.join(" ").toLowerCase();
 
   if (/(earthquake|magnitude|seismic)/.test(text)) return "earthquake";
-  if (/(flood|storm|wildfire|fire|heatwave|cyclone|hurricane|disaster|landslide|volcano|drought)/.test(text)) {
+  if (/(flood|storm|wildfire|\bfire\b|heatwave|cyclone|hurricane|disaster|landslide|volcano|drought)/.test(text)) {
     return "disaster";
   }
-  if (/(protest|demonstration|strike|unrest|rally)/.test(text)) return "protest";
-  if (/(conflict|clash|violence|shelling|attack|security incident)/.test(text)) {
+  if (/(war|conflict|clash|violence|shelling|attack|airstrike|air strike|missile strike|drone strike|missile|rocket|drone|ceasefire|invasion|occupation|offensive|frontline|bombardment|hostage|security incident)/.test(text)) {
     return "conflict";
   }
+  if (/(protest|demonstration|strike|unrest|rally)/.test(text)) return "protest";
   if (/(hospital|clinic|medical capacity)/.test(text)) return "hospital";
   if (/(health|disease|cholera|outbreak|heat stress)/.test(text)) return "health";
   if (/(power|electric|grid|blackout)/.test(text)) return "power";
@@ -457,6 +467,12 @@ function severityFromRss(
 }
 
 function extractPlaceFromText(text: string) {
+  const knownPlace = extractKnownPlaceFromText(text);
+
+  if (knownPlace) {
+    return knownPlace;
+  }
+
   const separators = [" in ", " near ", " at ", " - ", ", "];
   const match = text.match(/\b(?:in|near|at)\s+([A-Z][A-Za-z .'-]+(?:,\s*[A-Z][A-Za-z .'-]+)?)/);
 
@@ -475,12 +491,74 @@ function extractPlaceFromText(text: string) {
   return "";
 }
 
+function extractKnownPlaceFromText(text: string) {
+  const knownPlaces: Array<[RegExp, string]> = [
+    [/\bkyiv\b|\bkiev\b/i, "Kyiv"],
+    [/\bkharkiv\b/i, "Kharkiv"],
+    [/\bdonetsk\b/i, "Donetsk"],
+    [/\bluhansk\b/i, "Luhansk"],
+    [/\bkherson\b/i, "Kherson"],
+    [/\bzaporizhzhia\b|\bzaporizhia\b/i, "Zaporizhzhia"],
+    [/\bodesa\b|\bodessa\b/i, "Odesa"],
+    [/\bcrimea\b|\bcrimean\b/i, "Crimea"],
+    [/\bbelgorod\b/i, "Belgorod"],
+    [/\bkursk\b/i, "Kursk"],
+    [/\bgaza\b/i, "Gaza"],
+    [/\brafah\b/i, "Rafah"],
+    [/\bkhan younis\b/i, "Khan Younis"],
+    [/\bwest bank\b/i, "West Bank"],
+    [/\bramallah\b/i, "Ramallah"],
+    [/\bjerusalem\b/i, "Jerusalem"],
+    [/\btel aviv\b/i, "Tel Aviv"],
+    [/\bsouthern lebanon\b|\bsouth lebanon\b/i, "Southern Lebanon"],
+    [/\bbeirut\b/i, "Beirut"],
+    [/\bdamascus\b/i, "Damascus"],
+    [/\bkhartoum\b/i, "Khartoum"],
+    [/\bdarfur\b/i, "Darfur"],
+    [/\bsanaa\b|\bsana'a\b/i, "Sanaa"],
+    [/\brakhine\b/i, "Rakhine"],
+    [/\bkashmir\b/i, "Kashmir"]
+  ];
+  const match = knownPlaces.find(([pattern]) => pattern.test(text));
+
+  return match?.[1] ?? "";
+}
+
 function extractCountryFromText(text: string) {
+  const regionAliases: Array<[RegExp, string]> = [
+    [/\bgaza\b|\brafah\b|\bkhan younis\b|\bwest bank\b|\bpalestin/i, "Palestinian Territories"],
+    [/\btel aviv\b|\bjerusalem\b|\bisrael/i, "Israel"],
+    [/\bkyiv\b|\bkiev\b|\bkharkiv\b|\bdonetsk\b|\bluhansk\b|\bkherson\b|\bzaporizhzhia\b|\bzaporizhia\b|\bcrimea\b|\bodesa\b|\bodessa\b|\bukrain/i, "Ukraine"],
+    [/\bmoscow\b|\bbelgorod\b|\bkursk\b|\brussia\b|\brussian\b/i, "Russia"],
+    [/\bbeirut\b|\blebanon\b|\blebanese\b/i, "Lebanon"],
+    [/\bdamascus\b|\bsyria\b|\bsyrian\b/i, "Syria"],
+    [/\btehran\b|\biran\b|\birani/i, "Iran"],
+    [/\bkhartoum\b|\bdarfur\b|\bsudan\b|\bsudanese\b/i, "Sudan"],
+    [/\bsanaa\b|\byemen\b|\byemeni\b/i, "Yemen"],
+    [/\bmyanmar\b|\bburma\b|\brakhine\b/i, "Myanmar"],
+    [/\bkashmir\b|\bindia\b|\bindian\b/i, "India"],
+    [/\bpakistan\b|\bpakistani\b/i, "Pakistan"],
+    [/\bafghanistan\b|\bafghan\b/i, "Afghanistan"],
+    [/\biraq\b|\biraqi\b/i, "Iraq"],
+    [/\bsomalia\b|\bsomali\b/i, "Somalia"],
+    [/\blibya\b|\blibyan\b/i, "Libya"],
+    [/\bmali\b|\btuareg\b/i, "Mali"],
+    [/\bburkina faso\b|\bsahel\b/i, "Burkina Faso"],
+    [/\btaiwan\b|\btaipei\b/i, "Taiwan"]
+  ];
+  const alias = regionAliases.find(([pattern]) => pattern.test(text));
+
+  if (alias) {
+    return alias[1];
+  }
+
   const knownCountries = [
     "Argentina",
     "Australia",
+    "Afghanistan",
     "Bangladesh",
     "Brazil",
+    "Burkina Faso",
     "Canada",
     "Chile",
     "China",
@@ -489,14 +567,25 @@ function extractCountryFromText(text: string) {
     "Haiti",
     "India",
     "Indonesia",
+    "Iran",
+    "Iraq",
+    "Israel",
     "Italy",
     "Japan",
     "Kenya",
+    "Lebanon",
+    "Libya",
+    "Mali",
     "Mexico",
     "Myanmar",
     "Nepal",
     "Pakistan",
     "Philippines",
+    "Russia",
+    "Somalia",
+    "Sudan",
+    "Syria",
+    "Taiwan",
     "Tonga",
     "Turkey",
     "Ukraine",
@@ -552,6 +641,7 @@ function baseConfidence(sourceId: SourceId, category: EventCategory) {
   if (sourceId === "gdacs") return 0.86;
   if (sourceId === "eonet") return 0.82;
   if (sourceId === "reliefweb") return 0.78;
+  if (sourceId === "conflict-news") return 0.68;
   if (sourceId === "gdelt-doc") return 0.64;
   if (sourceId === "rss") return 0.62;
   if (category === "unverified") return 0.42;

@@ -575,7 +575,7 @@ async function updateCluster(
   const countsResult = await client.query<EventRow>(
     `SELECT
        COUNT(*)::INTEGER AS raw_report_count,
-       COUNT(DISTINCT source_id)::INTEGER AS source_count
+       COUNT(DISTINCT COALESCE(NULLIF(source_name, ''), source_id))::INTEGER AS source_count
      FROM event_sources
      WHERE event_id = $1`,
     [eventId]

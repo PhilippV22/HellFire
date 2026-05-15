@@ -3,11 +3,11 @@
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { EarthGlobe } from "@/components/EarthGlobe";
-import { mockTerrainFeatures } from "@/data/mockTerrain";
 import { hellfireBrandAssets } from "@/lib/brandAssets";
 import { categoryMeta, infrastructureLabels } from "@/lib/eventMeta";
 import { filterEvents, formatConfidence, formatDateTime } from "@/lib/filters";
 import { getNearbyInfrastructure } from "@/lib/infrastructure";
+import type { ConflictOverlayData } from "@/types/conflictOverlay";
 import {
   eventCategories,
   type CrisisEvent,
@@ -35,6 +35,8 @@ export function EarthSituationMonitor() {
   const [infrastructure, setInfrastructure] =
     useState<InfrastructureAsset[]>([]);
   const [timeline, setTimeline] = useState<TimelineBucket[]>([]);
+  const [conflictOverlay, setConflictOverlay] =
+    useState<ConflictOverlayData | null>(null);
   const [filters, setFilters] = useState<EventFilters>(initialFilters);
   const [selectedEventId, setSelectedEventId] = useState("");
   const [selectedDetail, setSelectedDetail] = useState<EventDetail | null>(null);
@@ -47,11 +49,17 @@ export function EarthSituationMonitor() {
     setLoading(true);
 
     try {
-      const [eventResponse, infrastructureResponse, timelineResponse] =
+      const [
+        eventResponse,
+        infrastructureResponse,
+        timelineResponse,
+        conflictOverlayResponse
+      ] =
         await Promise.all([
           fetch("/api/events", { cache: "no-store" }),
           fetch("/api/infrastructure", { cache: "no-store" }),
-          fetch("/api/timeline", { cache: "no-store" })
+          fetch("/api/timeline", { cache: "no-store" }),
+          fetch("/api/conflict-overlays", { cache: "no-store" })
         ]);
       const eventPayload =
         (await eventResponse.json()) as ApiListResponse<CrisisEvent[]>;
@@ -59,21 +67,26 @@ export function EarthSituationMonitor() {
         (await infrastructureResponse.json()) as ApiListResponse<InfrastructureAsset[]>;
       const timelinePayload =
         (await timelineResponse.json()) as ApiListResponse<TimelineBucket[]>;
+      const conflictOverlayPayload =
+        (await conflictOverlayResponse.json()) as ApiListResponse<ConflictOverlayData>;
 
       setEvents(eventPayload.data ?? []);
       setInfrastructure(infrastructurePayload.data ?? []);
       setTimeline(timelinePayload.data ?? []);
+      setConflictOverlay(conflictOverlayPayload.data ?? null);
       setDataMode("production");
       setWarning(
         eventPayload.warning ||
           infrastructurePayload.warning ||
           timelinePayload.warning ||
+          conflictOverlayPayload.warning ||
           ""
       );
     } catch (error) {
       setEvents([]);
       setInfrastructure([]);
       setTimeline([]);
+      setConflictOverlay(null);
       setDataMode("production");
       setWarning(error instanceof Error ? error.message : "API nicht erreichbar");
     } finally {
@@ -161,6 +174,7 @@ export function EarthSituationMonitor() {
         fetch("/api/ingest/emsc", { method: "POST" }),
         fetch("/api/ingest/gdacs", { method: "POST" }),
         fetch("/api/ingest/eonet", { method: "POST" }),
+        fetch("/api/ingest/conflict-news", { method: "POST" }),
         fetch("/api/ingest/rss", { method: "POST" })
       ]);
       await loadDashboard();
@@ -187,7 +201,7 @@ export function EarthSituationMonitor() {
     <main className="relative h-dvh min-h-[720px] overflow-hidden bg-black text-slate-100">
       <EarthGlobe
         events={filteredEvents}
-        terrainFeatures={mockTerrainFeatures}
+        conflictOverlay={conflictOverlay}
         selectedEvent={selectedEvent}
         onSelectEvent={selectEvent}
       />
@@ -203,8 +217,12 @@ export function EarthSituationMonitor() {
             className="h-12 w-auto max-w-[220px] object-contain"
           />
           <div className="hidden h-9 w-px bg-white/10 sm:block" />
-          <div className="grid grid-cols-2 gap-2 text-xs">
+          <div className="grid grid-cols-3 gap-2 text-xs">
             <Metric label="Events" value={filteredEvents.length.toString()} />
+            <Metric
+              label="Konflikt"
+              value={(conflictOverlay?.countries.length ?? 0).toString()}
+            />
             <Metric label="Mode" value={loading ? "Load" : dataMode.toUpperCase()} />
           </div>
           <button

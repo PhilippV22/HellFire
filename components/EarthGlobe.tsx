@@ -11,12 +11,12 @@ import {
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { categoryMeta } from "@/lib/eventMeta";
+import type { ConflictOverlayData } from "@/types/conflictOverlay";
 import type { CrisisEvent } from "@/types/events";
-import type { TerrainFeature, TerrainKind } from "@/types/terrain";
 
 type EarthGlobeProps = {
   events: CrisisEvent[];
-  terrainFeatures: TerrainFeature[];
+  conflictOverlay?: ConflictOverlayData | null;
   selectedEvent?: CrisisEvent;
   onSelectEvent: (event: CrisisEvent) => void;
 };
@@ -63,7 +63,7 @@ const satelliteTileUrlTemplate =
 
 export function EarthGlobe({
   events,
-  terrainFeatures,
+  conflictOverlay,
   selectedEvent,
   onSelectEvent
 }: EarthGlobeProps) {
@@ -76,8 +76,9 @@ export function EarthGlobe({
   const initialSelectedEventRef = useRef(selectedEvent);
   const targetQuaternionRef = useRef<THREE.Quaternion | null>(null);
   const targetCameraDistanceRef = useRef<number | null>(null);
-  const detailLayerRef = useRef<THREE.Group | null>(null);
   const satelliteLayerRef = useRef<THREE.Group | null>(null);
+  const conflictOverlayLayerRef = useRef<THREE.Group | null>(null);
+  const conflictOverlayRef = useRef(conflictOverlay);
   const tileTextureCacheRef = useRef(new Map<string, THREE.Texture>());
   const textureAnisotropyRef = useRef(1);
   const lastSatelliteLoadTimeRef = useRef(0);
@@ -104,6 +105,14 @@ export function EarthGlobe({
   useEffect(() => {
     eventsRef.current = events;
   }, [events]);
+
+  useEffect(() => {
+    conflictOverlayRef.current = conflictOverlay;
+
+    if (conflictOverlayLayerRef.current) {
+      syncConflictOverlayLayer(conflictOverlayLayerRef.current, conflictOverlay);
+    }
+  }, [conflictOverlay]);
 
   const focusEvent = useCallback((event: CrisisEvent) => {
     const earthGroup = earthGroupRef.current;
@@ -159,65 +168,6 @@ export function EarthGlobe({
       return merged;
     });
   }, []);
-
-  const updateZoomDetailLayer = useCallback(
-    (
-      camera: THREE.PerspectiveCamera,
-      earthGroup: THREE.Group,
-      earth: THREE.Mesh,
-      detailLayer: THREE.Group
-    ) => {
-      const distance = camera.position.length();
-      const level = getZoomRenderLevel(distance);
-      const centerFocus =
-        wheelFocusRef.current ??
-        getSurfaceFocusFromCenter(camera, earth);
-
-      if (distance > 2.78 || level === "global" || !centerFocus) {
-        if (renderedTileKeyRef.current !== "global") {
-          disposeChildren(detailLayer);
-          detailLayer.clear();
-          renderedTileKeyRef.current = "global";
-        }
-
-        if (controlsRef.current && distance > 3.1) {
-          controlsRef.current.autoRotate = true;
-        }
-
-        updateZoomRenderState({
-          latitude: centerFocus?.latitude ?? 0,
-          longitude: centerFocus?.longitude ?? 0,
-          level: "global",
-          tileKey: "global",
-          distance
-        });
-        return;
-      }
-
-      if (controlsRef.current) {
-        controlsRef.current.autoRotate = false;
-      }
-
-      const tileKey = getDetailTileKey(centerFocus, level);
-
-      if (renderedTileKeyRef.current !== tileKey) {
-        disposeChildren(detailLayer);
-        detailLayer.clear();
-        detailLayer.add(createZoomDetailTile(centerFocus, level));
-        renderedTileKeyRef.current = tileKey;
-      }
-
-      updateZoomRenderState({
-        ...centerFocus,
-        level,
-        tileKey,
-        distance
-      });
-
-      earthGroup.updateMatrixWorld();
-    },
-    [updateZoomRenderState]
-  );
 
   const updateSatelliteTileLayer = useCallback(
     (
@@ -290,8 +240,7 @@ export function EarthGlobe({
         tilePlan.radius,
         tileTextureCacheRef.current,
         satelliteTileUrlTemplate,
-        textureAnisotropyRef.current,
-        terrainFeatures
+        textureAnisotropyRef.current
       )
         .then((tileSet) => {
           if (renderedSatelliteKeyRef.current !== satelliteKey) {
@@ -338,7 +287,7 @@ export function EarthGlobe({
           });
         });
     },
-    [terrainFeatures, updateZoomRenderState]
+    [updateZoomRenderState]
   );
 
   useEffect(() => {
@@ -468,18 +417,17 @@ export function EarthGlobe({
       })
     );
     earthGroup.add(atmosphere);
-    const terrainLayer = createTerrainLayer(terrainFeatures);
-    earthGroup.add(terrainLayer);
-
-    const detailLayer = new THREE.Group();
-    detailLayer.name = "mock-zoom-detail-layer";
-    detailLayerRef.current = detailLayer;
-    earthGroup.add(detailLayer);
 
     const satelliteLayer = new THREE.Group();
     satelliteLayer.name = "streamed-satellite-tile-layer";
     satelliteLayerRef.current = satelliteLayer;
     earthGroup.add(satelliteLayer);
+
+    const conflictOverlayLayer = new THREE.Group();
+    conflictOverlayLayer.name = "public-conflict-overlay-layer";
+    conflictOverlayLayerRef.current = conflictOverlayLayer;
+    syncConflictOverlayLayer(conflictOverlayLayer, conflictOverlayRef.current);
+    earthGroup.add(conflictOverlayLayer);
 
     scene.add(createStarField());
 
@@ -528,8 +476,6 @@ export function EarthGlobe({
 
       applyAdaptiveControlSensitivity(controls, camera.position.length());
       controls.update();
-      terrainLayer.visible = shouldShowTerrainLayer(camera.position.length());
-      updateZoomDetailLayer(camera, earthGroup, earth, detailLayer);
       updateSatelliteTileLayer(camera, earth, satelliteLayer);
       renderer.render(scene, camera);
       setMarkerPositions(
@@ -563,10 +509,10 @@ export function EarthGlobe({
       cameraRef.current = null;
       controlsRef.current = null;
       earthGroupRef.current = null;
-      detailLayerRef.current = null;
       satelliteLayerRef.current = null;
+      conflictOverlayLayerRef.current = null;
     };
-  }, [terrainFeatures, updateSatelliteTileLayer, updateZoomDetailLayer]);
+  }, [updateSatelliteTileLayer]);
 
   function zoom(delta: number) {
     const camera = cameraRef.current;
@@ -605,10 +551,6 @@ export function EarthGlobe({
     renderedSatelliteKeyRef.current = "";
     lastSatelliteLoadTimeRef.current = 0;
     prefetchedSatelliteKeysRef.current.clear();
-    if (detailLayerRef.current) {
-      disposeChildren(detailLayerRef.current);
-      detailLayerRef.current.clear();
-    }
     if (satelliteLayerRef.current) {
       disposeChildren(satelliteLayerRef.current);
       satelliteLayerRef.current.clear();
@@ -813,10 +755,6 @@ function getAdaptiveZoomDelta(delta: number, distance: number) {
   return direction * Math.abs(delta) * zoomScale;
 }
 
-function shouldShowTerrainLayer(distance: number) {
-  return distance <= 2.78;
-}
-
 function getSatelliteTilePlan(camera: THREE.PerspectiveCamera): SatelliteTilePlan | null {
   const distance = camera.position.length();
 
@@ -872,8 +810,7 @@ async function loadSatelliteTileSet(
   radius: number,
   textureCache: Map<string, THREE.Texture>,
   urlTemplate: string,
-  anisotropy: number,
-  terrainFeatures: TerrainFeature[]
+  anisotropy: number
 ) {
   const group = new THREE.Group();
   group.name = `satellite-tiles-z${centerTile.z}`;
@@ -890,7 +827,7 @@ async function loadSatelliteTileSet(
   }
 
   const meshes = loadedTiles.map(({ tile, texture }) =>
-    createSatelliteTileMesh(tile, texture, terrainFeatures)
+    createSatelliteTileMesh(tile, texture)
   );
   group.add(...meshes);
 
@@ -1017,16 +954,13 @@ async function loadTileTexture(
 
 function createSatelliteTileMesh(
   tile: XyzTile,
-  texture: THREE.Texture,
-  terrainFeatures: TerrainFeature[]
+  texture: THREE.Texture
 ) {
   const bounds = xyzTileBounds(tile);
   const geometry = createTilePatchGeometry(
     bounds,
     tile.z >= 12 ? 32 : 18,
-    globeRadius + satelliteTileOffset,
-    tile.z,
-    terrainFeatures
+    globeRadius + satelliteTileOffset
   );
   const material = new THREE.MeshStandardMaterial({
     map: texture,
@@ -1048,9 +982,7 @@ function createSatelliteTileMesh(
 function createTilePatchGeometry(
   bounds: { north: number; south: number; west: number; east: number },
   segments: number,
-  radius: number,
-  zoom: number,
-  terrainFeatures: TerrainFeature[]
+  radius: number
 ) {
   const positions: number[] = [];
   const uvs: number[] = [];
@@ -1063,17 +995,7 @@ function createTilePatchGeometry(
     for (let column = 0; column <= segments; column += 1) {
       const u = column / segments;
       const longitude = bounds.west + (bounds.east - bounds.west) * u;
-      const terrainElevation = getTerrainElevationAt(
-        latitude,
-        longitude,
-        terrainFeatures,
-        zoom
-      );
-      const position = latLngToVector3(
-        latitude,
-        longitude,
-        radius + terrainElevation
-      );
+      const position = latLngToVector3(latitude, longitude, radius);
 
       positions.push(position.x, position.y, position.z);
       uvs.push(u, 1 - v);
@@ -1098,87 +1020,6 @@ function createTilePatchGeometry(
   geometry.computeVertexNormals();
 
   return geometry;
-}
-
-function getTerrainElevationAt(
-  latitude: number,
-  longitude: number,
-  terrainFeatures: TerrainFeature[],
-  zoom: number
-) {
-  if (zoom < 8) {
-    return 0;
-  }
-
-  const zoomFade = THREE.MathUtils.clamp((zoom - 8) / 4, 0, 1);
-  let elevation = 0;
-
-  for (const feature of terrainFeatures) {
-    if (feature.kind === "forest" || feature.kind === "river") {
-      continue;
-    }
-
-    const distance = distanceToTerrainFeatureDegrees(latitude, longitude, feature);
-    const width = getReliefWidthDegrees(feature.kind, feature.intensity);
-
-    if (distance > width * 2.6) {
-      continue;
-    }
-
-    const ridgeProfile = Math.exp(-Math.pow(distance / width, 2) * 2.35);
-    elevation += getReliefHeight(feature.kind, feature.intensity) * ridgeProfile;
-  }
-
-  return THREE.MathUtils.clamp(elevation * zoomFade, 0, 0.07);
-}
-
-function distanceToTerrainFeatureDegrees(
-  latitude: number,
-  longitude: number,
-  feature: Extract<TerrainFeature, { kind: "river" | "ridge" | "cliff" | "highland" }>
-) {
-  let closest = Number.POSITIVE_INFINITY;
-
-  for (let index = 0; index < feature.coordinates.length - 1; index += 1) {
-    const start = feature.coordinates[index];
-    const end = feature.coordinates[index + 1];
-    closest = Math.min(
-      closest,
-      distanceToTerrainSegmentDegrees(latitude, longitude, start, end)
-    );
-  }
-
-  return closest;
-}
-
-function distanceToTerrainSegmentDegrees(
-  latitude: number,
-  longitude: number,
-  start: SurfaceFocus,
-  end: SurfaceFocus
-) {
-  const referenceLatitude = (start.latitude + end.latitude + latitude) / 3;
-  const longitudeScale = Math.max(
-    Math.cos(THREE.MathUtils.degToRad(referenceLatitude)),
-    0.22
-  );
-  const segmentX = longitudeDelta(end.longitude, start.longitude) * longitudeScale;
-  const segmentY = end.latitude - start.latitude;
-  const pointX = longitudeDelta(longitude, start.longitude) * longitudeScale;
-  const pointY = latitude - start.latitude;
-  const segmentLengthSq = segmentX * segmentX + segmentY * segmentY;
-  const t =
-    segmentLengthSq === 0
-      ? 0
-      : THREE.MathUtils.clamp(
-          (pointX * segmentX + pointY * segmentY) / segmentLengthSq,
-          0,
-          1
-        );
-  const closestX = segmentX * t;
-  const closestY = segmentY * t;
-
-  return Math.hypot(pointX - closestX, pointY - closestY);
 }
 
 function xyzTileBounds(tile: XyzTile) {
@@ -1214,484 +1055,92 @@ function getDetailTileKey(focus: SurfaceFocus, level: ZoomRenderLevel) {
   return `${level}:${latCell}:${lonCell}`;
 }
 
-function createZoomDetailTile(focus: SurfaceFocus, level: ZoomRenderLevel) {
-  const group = new THREE.Group();
-  group.name = `rendered-detail-${getDetailTileKey(focus, level)}`;
-  const local = level === "local";
-  const extent = local ? 0.34 : 1.35;
-  const seed = hashString(group.name);
-  const random = createSeededRandom(seed);
-
-  group.add(
-    createSurfacePolyline(
-      createTileBoundary(focus, extent),
-      0x67e8f9,
-      local ? 0.0014 : 0.0032,
-      0.72,
-      0.078
-    )
-  );
-
-  for (let index = 0; index < (local ? 10 : 5); index += 1) {
-    const offset = -extent * 0.72 + index * ((extent * 1.44) / (local ? 9 : 4));
-    const coordinates = Array.from({ length: 7 }, (_, pointIndex) => {
-      const step = -extent + pointIndex * ((extent * 2) / 6);
-      const bend = Math.sin(pointIndex * 1.6 + seed * 0.001 + index) * extent * 0.08;
-
-      return {
-        latitude: clampLatitude(focus.latitude + offset + bend),
-        longitude: normalizeLongitude(focus.longitude + step)
-      };
-    });
-
-    group.add(
-      createSurfacePolyline(
-        coordinates,
-        0xf8e8b0,
-        local ? 0.0009 : 0.002,
-        0.52,
-        0.073
-      )
-    );
-  }
-
-  for (let index = 0; index < (local ? 4 : 2); index += 1) {
-    const startLat = focus.latitude + (random() - 0.5) * extent * 1.6;
-    const startLon = focus.longitude - extent * (0.72 + random() * 0.28);
-    const coordinates = Array.from({ length: 6 }, (_, pointIndex) => ({
-      latitude: clampLatitude(
-        startLat + Math.sin(pointIndex * 1.25 + random()) * extent * 0.12
-      ),
-      longitude: normalizeLongitude(startLon + pointIndex * ((extent * 1.55) / 5))
-    }));
-
-    group.add(
-      createSurfacePolyline(
-        coordinates,
-        0x0b3d75,
-        local ? 0.0016 : 0.0032,
-        0.86,
-        0.082
-      )
-    );
-  }
-
-  for (let index = 0; index < (local ? 30 : 14); index += 1) {
-    const latitude = clampLatitude(focus.latitude + (random() - 0.5) * extent * 1.65);
-    const longitude = normalizeLongitude(focus.longitude + (random() - 0.5) * extent * 1.65);
-    const radius = local ? 0.0035 + random() * 0.0055 : 0.011 + random() * 0.012;
-
-    group.add(createDetailForestDot(latitude, longitude, radius, random() > 0.42));
-  }
-
-  for (let index = 0; index < (local ? 10 : 5); index += 1) {
-    const latitude = clampLatitude(focus.latitude + (random() - 0.5) * extent * 1.2);
-    const longitude = normalizeLongitude(focus.longitude + (random() - 0.5) * extent * 1.2);
-
-    group.add(createDetailPeak(latitude, longitude, random() > 0.72 ? "cliff" : "ridge"));
-  }
-
-  return group;
-}
-
-function createTileBoundary(focus: SurfaceFocus, extent: number) {
-  return [
-    {
-      latitude: clampLatitude(focus.latitude - extent),
-      longitude: normalizeLongitude(focus.longitude - extent)
-    },
-    {
-      latitude: clampLatitude(focus.latitude - extent),
-      longitude: normalizeLongitude(focus.longitude + extent)
-    },
-    {
-      latitude: clampLatitude(focus.latitude + extent),
-      longitude: normalizeLongitude(focus.longitude + extent)
-    },
-    {
-      latitude: clampLatitude(focus.latitude + extent),
-      longitude: normalizeLongitude(focus.longitude - extent)
-    },
-    {
-      latitude: clampLatitude(focus.latitude - extent),
-      longitude: normalizeLongitude(focus.longitude - extent)
-    }
-  ];
-}
-
-function createSurfacePolyline(
+function createSurfaceLine(
   coordinates: SurfaceFocus[],
   color: number,
-  radius: number,
   opacity: number,
-  altitude: number
+  altitude: number,
+  lineWidth = 1
 ) {
   const points = coordinates.map((coordinate) =>
     latLngToVector3(coordinate.latitude, coordinate.longitude, globeRadius + altitude)
   );
-  const curve = new THREE.CatmullRomCurve3(points);
-  const geometry = new THREE.TubeGeometry(curve, Math.max(points.length * 12, 36), radius, 6, false);
-  const material = new THREE.MeshBasicMaterial({
+  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+  const material = new THREE.LineBasicMaterial({
     color,
     transparent: true,
     opacity,
+    linewidth: lineWidth,
     depthWrite: false
   });
 
-  return new THREE.Mesh(geometry, material);
+  return new THREE.Line(geometry, material);
 }
 
-function createDetailForestDot(
-  latitude: number,
-  longitude: number,
-  radius: number,
-  dense: boolean
+function syncConflictOverlayLayer(
+  layer: THREE.Group,
+  overlay?: ConflictOverlayData | null
 ) {
-  const geometry = new THREE.CircleGeometry(radius, 12);
-  const material = new THREE.MeshBasicMaterial({
-    color: dense ? 0x19d875 : 0x37f59d,
-    transparent: true,
-    opacity: dense ? 0.62 : 0.44,
-    side: THREE.DoubleSide,
-    depthWrite: false
-  });
-  const dot = new THREE.Mesh(geometry, material);
-  placeOnGlobeSurface(dot, latitude, longitude, 0.09, "z");
+  disposeChildren(layer);
+  layer.clear();
 
-  return dot;
+  if (!overlay) {
+    return;
+  }
+
+  layer.add(createConflictOverlayLayer(overlay));
 }
 
-function createDetailPeak(latitude: number, longitude: number, kind: TerrainKind) {
-  const bend = kind === "cliff" ? 0.09 : 0.06;
-  const coordinates = [
-    {
-      latitude: clampLatitude(latitude - bend * 0.7),
-      longitude: normalizeLongitude(longitude - bend)
-    },
-    { latitude, longitude },
-    {
-      latitude: clampLatitude(latitude + bend * 0.7),
-      longitude: normalizeLongitude(longitude + bend)
-    }
-  ];
-
-  return createRaisedTerrainRibbon(coordinates, kind, kind === "cliff" ? 2 : 1, 0.38);
-}
-
-function createTerrainLayer(features: TerrainFeature[]) {
+function createConflictOverlayLayer(overlay: ConflictOverlayData) {
   const group = new THREE.Group();
-  group.name = "mock-rough-terrain-layer";
+  group.name = "public-conflict-overlays";
 
-  features.forEach((feature) => {
-    if (feature.kind === "forest") {
-      group.add(createForestPatch(feature));
-      return;
+  for (const borderLine of overlay.borderLines) {
+    for (const ring of borderLine.rings) {
+      if (ring.length < 3) {
+        continue;
+      }
+
+      const line = createSurfaceLine(ring, 0xff2a2a, 0.9, 0.006, 1);
+      line.name = `conflict-border-${borderLine.country}`;
+      line.renderOrder = 7;
+      group.add(line);
+    }
+  }
+
+  for (const frontline of overlay.frontlines) {
+    if (frontline.coordinates.length < 2) {
+      continue;
     }
 
-    group.add(createLinearTerrain(feature));
-  });
+    const halo = createSurfaceLine(
+      frontline.coordinates,
+      0xff2a2a,
+      0.28,
+      0.01,
+      2
+    );
+    halo.name = `${frontline.id}-halo`;
+    halo.renderOrder = 8;
+    group.add(halo);
+
+    const line = createSurfaceLine(
+      frontline.coordinates,
+      0xff5a3d,
+      0.96,
+      0.012,
+      2
+    );
+    line.name = frontline.id;
+    line.renderOrder = 9;
+    group.add(line);
+  }
 
   return group;
-}
-
-function createForestPatch(feature: Extract<TerrainFeature, { kind: "forest" }>) {
-  const radiusLat = degreesToSurfaceUnits(feature.radiusLatitude);
-  const radiusLng =
-    degreesToSurfaceUnits(feature.radiusLongitude) *
-    Math.max(Math.cos(THREE.MathUtils.degToRad(feature.center.latitude)), 0.35);
-  const geometry = new THREE.CircleGeometry(1, 56);
-  const material = new THREE.MeshStandardMaterial({
-    color: feature.density === "very-dense" ? 0x0f7a3b : 0x1f9d55,
-    transparent: true,
-    opacity: feature.density === "very-dense" ? 0.46 : 0.34,
-    roughness: 0.95,
-    metalness: 0,
-    depthWrite: false
-  });
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.name = feature.name;
-  mesh.scale.set(radiusLng, radiusLat, 1);
-  placeOnGlobeSurface(
-    mesh,
-    feature.center.latitude,
-    feature.center.longitude,
-    0.024,
-    "z"
-  );
-  mesh.rotateZ(THREE.MathUtils.degToRad(feature.rotation));
-
-  const ring = new THREE.LineLoop(
-    new THREE.BufferGeometry().setFromPoints(createCirclePoints(64)),
-    new THREE.LineBasicMaterial({
-      color: 0x63f6a6,
-      transparent: true,
-      opacity: 0.38
-    })
-  );
-  ring.scale.set(radiusLng * 1.04, radiusLat * 1.04, 1);
-  placeOnGlobeSurface(
-    ring,
-    feature.center.latitude,
-    feature.center.longitude,
-    0.027,
-    "z"
-  );
-  ring.rotateZ(THREE.MathUtils.degToRad(feature.rotation));
-
-  const patch = new THREE.Group();
-  patch.add(mesh, ring);
-
-  return patch;
-}
-
-function createLinearTerrain(
-  feature: Extract<TerrainFeature, { kind: "river" | "ridge" | "cliff" | "highland" }>
-) {
-  if (feature.kind === "river") {
-    return createRiverTerrain(feature);
-  }
-
-  return createReliefTerrain(feature);
-}
-
-function createRiverTerrain(
-  feature: Extract<TerrainFeature, { kind: "river" | "ridge" | "cliff" | "highland" }>
-) {
-  const group = new THREE.Group();
-  const color = terrainColor(feature.kind);
-  const radius = terrainTubeRadius(feature.kind, feature.intensity);
-  const altitude = 0.014;
-  const points = feature.coordinates.map((coordinate) =>
-    latLngToVector3(coordinate.latitude, coordinate.longitude, globeRadius + altitude)
-  );
-  const curve = new THREE.CatmullRomCurve3(points);
-  const geometry = new THREE.TubeGeometry(
-    curve,
-    Math.max(points.length * 16, 72),
-    radius,
-    8,
-    false
-  );
-  const material = new THREE.MeshBasicMaterial({
-    color,
-    transparent: true,
-    opacity: 0.92,
-    depthWrite: false
-  });
-
-  const tube = new THREE.Mesh(geometry, material);
-  tube.name = feature.name;
-  group.add(tube);
-
-  return group;
-}
-
-function createReliefTerrain(
-  feature: Extract<TerrainFeature, { kind: "river" | "ridge" | "cliff" | "highland" }>
-) {
-  const group = new THREE.Group();
-  const relief = createRaisedTerrainRibbon(
-    feature.coordinates,
-    feature.kind,
-    feature.intensity,
-    0.45
-  );
-  relief.name = feature.name;
-  group.add(relief);
-
-  return group;
-}
-
-function createRaisedTerrainRibbon(
-  coordinates: SurfaceFocus[],
-  kind: TerrainKind,
-  intensity: 1 | 2 | 3,
-  opacity: number
-) {
-  const normals = coordinates.map((coordinate) =>
-    latLngToVector3(coordinate.latitude, coordinate.longitude, 1).normalize()
-  );
-  const curve = new THREE.CatmullRomCurve3(normals);
-  const alongSegments = Math.max(coordinates.length * 24, 48);
-  const crossSegments = 8;
-  const width = degreesToSurfaceUnits(getReliefWidthDegrees(kind, intensity));
-  const height = getReliefHeight(kind, intensity);
-  const positions: number[] = [];
-  const uvs: number[] = [];
-  const indices: number[] = [];
-
-  for (let row = 0; row <= alongSegments; row += 1) {
-    const v = row / alongSegments;
-    const normal = curve.getPoint(v).normalize();
-    const tangent = curve.getTangent(v).normalize();
-    let side = new THREE.Vector3().crossVectors(tangent, normal).normalize();
-
-    if (side.lengthSq() < 0.0001) {
-      side = new THREE.Vector3(0, 1, 0).cross(normal).normalize();
-    }
-
-    const lengthModulation = 0.88 + Math.sin(v * Math.PI * 5.5) * 0.08;
-
-    for (let column = 0; column <= crossSegments; column += 1) {
-      const u = column / crossSegments;
-      const lateral = (u - 0.5) * 2;
-      const ridgeProfile = Math.exp(-Math.pow(lateral * 2.05, 2));
-      const base = normal
-        .clone()
-        .multiplyScalar(globeRadius)
-        .add(side.clone().multiplyScalar(lateral * width));
-      const surfaceNormal = base.normalize();
-      const position = surfaceNormal.multiplyScalar(
-        globeRadius + 0.006 + height * ridgeProfile * lengthModulation
-      );
-
-      positions.push(position.x, position.y, position.z);
-      uvs.push(u, v);
-    }
-  }
-
-  for (let row = 0; row < alongSegments; row += 1) {
-    for (let column = 0; column < crossSegments; column += 1) {
-      const a = row * (crossSegments + 1) + column;
-      const b = a + 1;
-      const c = a + crossSegments + 1;
-      const d = c + 1;
-
-      indices.push(a, c, b, b, c, d);
-    }
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
-
-  const material = new THREE.MeshStandardMaterial({
-    color: kind === "cliff" ? 0xc48a52 : 0xb8b3a4,
-    metalness: 0,
-    opacity,
-    roughness: 0.94,
-    side: THREE.DoubleSide,
-    transparent: true,
-    depthWrite: false
-  });
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.renderOrder = 5;
-
-  return mesh;
-}
-
-function createCirclePoints(segments: number) {
-  return Array.from({ length: segments }, (_, index) => {
-    const angle = (index / segments) * Math.PI * 2;
-
-    return new THREE.Vector3(Math.cos(angle), Math.sin(angle), 0);
-  });
-}
-
-function placeOnGlobeSurface(
-  object: THREE.Object3D,
-  latitude: number,
-  longitude: number,
-  altitude: number,
-  axis: "y" | "z"
-) {
-  const normal = latLngToVector3(latitude, longitude, 1).normalize();
-  const from = axis === "y" ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
-
-  object.position.copy(normal.clone().multiplyScalar(globeRadius + altitude));
-  object.quaternion.setFromUnitVectors(from, normal);
-}
-
-function degreesToSurfaceUnits(degrees: number) {
-  return globeRadius * THREE.MathUtils.degToRad(degrees);
-}
-
-function terrainColor(kind: TerrainKind) {
-  if (kind === "river") {
-    return 0x0b3d75;
-  }
-
-  if (kind === "cliff") {
-    return 0xffa24a;
-  }
-
-  if (kind === "highland") {
-    return 0xdad7c9;
-  }
-
-  return 0xffe59f;
-}
-
-function terrainTubeRadius(kind: TerrainKind, intensity: 1 | 2 | 3) {
-  if (kind === "river") {
-    return 0.012;
-  }
-
-  const base = 0.0065;
-
-  return base + intensity * 0.0035;
-}
-
-function getReliefWidthDegrees(kind: TerrainKind, intensity: 1 | 2 | 3) {
-  if (kind === "cliff") {
-    return 0.12 + intensity * 0.06;
-  }
-
-  if (kind === "highland") {
-    return 0.22 + intensity * 0.1;
-  }
-
-  return 0.16 + intensity * 0.08;
-}
-
-function getReliefHeight(kind: TerrainKind, intensity: 1 | 2 | 3) {
-  if (kind === "cliff") {
-    return 0.018 + intensity * 0.008;
-  }
-
-  if (kind === "highland") {
-    return 0.012 + intensity * 0.006;
-  }
-
-  return 0.014 + intensity * 0.007;
 }
 
 function normalizeLongitude(longitude: number) {
   return ((((longitude + 180) % 360) + 360) % 360) - 180;
-}
-
-function longitudeDelta(longitude: number, origin: number) {
-  return normalizeLongitude(longitude - origin);
-}
-
-function clampLatitude(latitude: number) {
-  return THREE.MathUtils.clamp(latitude, -84, 84);
-}
-
-function hashString(value: string) {
-  let hash = 2166136261;
-
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-
-  return hash >>> 0;
-}
-
-function createSeededRandom(seed: number) {
-  let state = seed;
-
-  return () => {
-    state += 0x6d2b79f5;
-    let value = state;
-    value = Math.imul(value ^ (value >>> 15), value | 1);
-    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-
-    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-  };
 }
 
 function zoomRenderLabel(state: ZoomRenderState) {

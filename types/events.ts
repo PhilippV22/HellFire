@@ -32,6 +32,7 @@ export type SourceType =
   | "gdacs"
   | "eonet"
   | "emsc"
+  | "conflict-news"
   | "rss"
   | "admin";
 

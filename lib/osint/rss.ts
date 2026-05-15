@@ -4,6 +4,9 @@ export type ParsedRssItem = Record<string, unknown> & {
   feedId: string;
   feedName: string;
   categoryHint?: string;
+  sourceCountry?: string;
+  sourceLanguage?: string;
+  feedUrl?: string;
 };
 
 const parser = new XMLParser({
@@ -14,7 +17,14 @@ const parser = new XMLParser({
 
 export function parseRssItems(
   xml: string,
-  options: { feedId: string; feedName: string; categoryHint?: string }
+  options: {
+    feedId: string;
+    feedName: string;
+    categoryHint?: string;
+    sourceCountry?: string;
+    sourceLanguage?: string;
+    feedUrl?: string;
+  }
 ): ParsedRssItem[] {
   const parsed = parser.parse(xml) as Record<string, unknown>;
   const rss = recordValue(parsed.rss);
@@ -25,7 +35,10 @@ export function parseRssItems(
     ...item,
     feedId: options.feedId,
     feedName: options.feedName,
-    categoryHint: options.categoryHint
+    categoryHint: options.categoryHint,
+    sourceCountry: options.sourceCountry,
+    sourceLanguage: options.sourceLanguage,
+    feedUrl: options.feedUrl
   }));
 }
 

@@ -27,7 +27,7 @@ const categoryImpacts: Record<EventCategory, string> = {
   protest:
     "Oeffentlicher Verkehr, Innenstadtzugang und kommunale Dienste koennen zeitweise beeintraechtigt sein.",
   conflict:
-    "Zivile Sicherheit, Grundversorgung und Bewegungsfreiheit der Bevoelkerung koennen beeintraechtigt sein.",
+    "Zivile Sicherheit, Grundversorgung, Bewegungsfreiheit, Fluchtwege und humanitaere Dienste koennen beeintraechtigt sein; die Bewertung bleibt nicht-operativ.",
   health:
     "Vulnerable Gruppen, Kliniken und oeffentliche Gesundheitskommunikation stehen im Vordergrund.",
   incident:

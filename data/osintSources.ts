@@ -7,6 +7,7 @@ export type SourceConfig = {
     | "gdacs"
     | "eonet"
     | "emsc"
+    | "conflict-news"
     | "rss";
   name: string;
   sourceType:
@@ -17,6 +18,7 @@ export type SourceConfig = {
     | "gdacs"
     | "eonet"
     | "emsc"
+    | "conflict-news"
     | "rss";
   baseUrl: string;
   cadenceMinutes?: number;
@@ -71,6 +73,13 @@ export const osintSources: SourceConfig[] = [
     sourceType: "emsc",
     baseUrl: "https://www.seismicportal.eu/fdsnws/event/1/query",
     cadenceMinutes: 10
+  },
+  {
+    id: "conflict-news",
+    name: "International Conflict News",
+    sourceType: "conflict-news",
+    baseUrl: "local://international-conflict-news-feeds",
+    cadenceMinutes: 15
   },
   {
     id: "rss",
