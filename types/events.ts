@@ -17,7 +17,7 @@ export const eventCategories = [
 
 export type EventCategory = (typeof eventCategories)[number];
 
-export type EventStatus = "unreviewed" | "confirmed" | "rejected";
+export type EventStatus = "unreviewed" | "confirmed" | "rejected" | "archived";
 
 export type SourceType =
   | "public-agency"
@@ -65,6 +65,7 @@ export type CrisisEvent = {
   sourceCount?: number;
   rawReportCount?: number;
   geocodeConfidence?: number;
+  archivedAt?: string;
   updatedAt?: string;
 };
 

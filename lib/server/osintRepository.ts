@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import { localInfrastructure } from "@/data/localInfrastructure";
 import { osintSources } from "@/data/osintSources";
+import { getEventRetentionHours } from "@/lib/eventLifecycle";
 import { createCivilImpactAnalysis } from "@/lib/osint/impact";
 import type { NormalizedReport } from "@/lib/osint/normalize";
 import { query, withClient } from "@/lib/server/db";
@@ -25,6 +26,7 @@ type IngestStats = {
   rawReports: number;
   eventsCreated: number;
   eventsUpdated: number;
+  eventsArchived: number;
   skipped: number;
 };
 
@@ -96,6 +98,7 @@ export async function storeNormalizedReports(
     rawReports: 0,
     eventsCreated: 0,
     eventsUpdated: 0,
+    eventsArchived: 0,
     skipped: 0
   };
 
@@ -107,6 +110,8 @@ export async function storeNormalizedReports(
     stats.eventsUpdated += !result.created && !result.skipped ? 1 : 0;
   }
 
+  stats.eventsArchived = await archiveExpiredEvents();
+
   return stats;
 }
 
@@ -114,7 +119,11 @@ export async function listEvents(
   filters: Partial<EventFilters> = {},
   options: { includeRejected?: boolean } = {}
 ) {
-  const where: string[] = [options.includeRejected ? "TRUE" : "status <> 'rejected'"];
+  await archiveExpiredEvents();
+
+  const where: string[] = [
+    options.includeRejected ? "TRUE" : "status NOT IN ('rejected', 'archived')"
+  ];
   const values: unknown[] = [];
 
   if (filters.categories?.length) {
@@ -155,8 +164,19 @@ export async function listEvents(
   return result.rows.map((row) => mapEventRow(row, sourceMap.get(String(row.id)) ?? []));
 }
 
-export async function getEventDetail(eventId: string): Promise<EventDetail | null> {
-  const eventResult = await query<EventRow>("SELECT * FROM events WHERE id = $1", [eventId]);
+export async function getEventDetail(
+  eventId: string,
+  options: { includeInactive?: boolean } = {}
+): Promise<EventDetail | null> {
+  await archiveExpiredEvents();
+
+  const eventResult = await query<EventRow>(
+    `SELECT *
+     FROM events
+     WHERE id = $1
+       ${options.includeInactive ? "" : "AND status NOT IN ('rejected', 'archived')"}`,
+    [eventId]
+  );
   const eventRow = eventResult.rows[0];
 
   if (!eventRow) {
@@ -232,7 +252,9 @@ export async function findNearbyInfrastructure(
 }
 
 export async function listTimeline(filters: { country?: string; region?: string } = {}) {
-  const where: string[] = ["status <> 'rejected'"];
+  await archiveExpiredEvents();
+
+  const where: string[] = ["status NOT IN ('rejected', 'archived')"];
   const values: unknown[] = [];
 
   if (filters.country) {
@@ -290,6 +312,12 @@ export async function updateEventAdmin(
   if (input.status) {
     values.push(input.status);
     updates.push(`status = $${values.length}`);
+    updates.push(
+      `archived_at = CASE
+        WHEN $${values.length} = 'archived' THEN COALESCE(archived_at, NOW())
+        ELSE NULL
+      END`
+    );
   }
 
   if (typeof input.confidence === "number") {
@@ -303,7 +331,7 @@ export async function updateEventAdmin(
   }
 
   if (updates.length === 0) {
-    return getEventDetail(eventId);
+    return getEventDetail(eventId, { includeInactive: true });
   }
 
   values.push(eventId);
@@ -332,7 +360,38 @@ export async function updateEventAdmin(
     ]
   );
 
-  return getEventDetail(eventId);
+  return getEventDetail(eventId, { includeInactive: true });
+}
+
+export async function archiveExpiredEvents() {
+  const result = await query<EventRow>(
+    `UPDATE events
+     SET status = 'archived',
+         archived_at = COALESCE(archived_at, NOW()),
+         updated_at = NOW()
+     WHERE status NOT IN ('rejected', 'archived')
+       AND GREATEST(event_time, detected_time) <
+         NOW() - ${retentionIntervalSql()}
+     RETURNING id`
+  );
+
+  if (result.rows.length > 0) {
+    await query(
+      `INSERT INTO analysis_notes (id, event_id, note_type, body, created_by)
+       SELECT
+         'note-' || MD5(id || ':archived:' || archived_at::TEXT),
+         id,
+         'system',
+         'Event automatisch archiviert, weil kein aktuelles Update innerhalb des Kategorie-Zeitfensters vorliegt.',
+         'lifecycle'
+       FROM events
+       WHERE id = ANY($1::TEXT[])
+       ON CONFLICT (id) DO NOTHING`,
+      [result.rows.map((row) => String(row.id))]
+    );
+  }
+
+  return result.rows.length;
 }
 
 async function storeNormalizedReport(
@@ -451,7 +510,7 @@ async function findCluster(
      SELECT events.*, ST_Distance(events.geom, candidate.geom) AS distance_m
      FROM events, candidate
      WHERE
-       status <> 'rejected'
+       status NOT IN ('rejected', 'archived')
        AND category = $3
        AND event_time BETWEEN ($4::TIMESTAMPTZ - INTERVAL '48 hours')
          AND ($4::TIMESTAMPTZ + INTERVAL '48 hours')
@@ -755,6 +814,39 @@ function inferCountry(name: string) {
   const first = name.split(" ")[0];
 
   return lookup[first] ?? null;
+}
+
+const lifecycleCategories: EventCategory[] = [
+  "power",
+  "oil",
+  "hospital",
+  "bridge",
+  "rail",
+  "water",
+  "communication",
+  "earthquake",
+  "disaster",
+  "protest",
+  "conflict",
+  "health",
+  "incident",
+  "unverified"
+];
+
+function retentionIntervalSql() {
+  const cases = lifecycleCategories
+    .map(
+      (category) =>
+        `WHEN '${category}' THEN INTERVAL '${getEventRetentionHours(category, 1)} hours'`
+    )
+    .join("\n         ");
+
+  return `(
+       CASE category
+         ${cases}
+         ELSE INTERVAL '72 hours'
+       END + GREATEST(severity - 1, 0) * INTERVAL '12 hours'
+     )`;
 }
 
 function hashString(value: string) {

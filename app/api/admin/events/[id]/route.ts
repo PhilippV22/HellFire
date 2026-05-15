@@ -6,7 +6,7 @@ type RouteContext = {
   params: Promise<{ id: string }>;
 };
 
-const statuses: EventStatus[] = ["unreviewed", "confirmed", "rejected"];
+const statuses: EventStatus[] = ["unreviewed", "confirmed", "rejected", "archived"];
 
 export async function PATCH(request: Request, context: RouteContext) {
   const { id } = await context.params;

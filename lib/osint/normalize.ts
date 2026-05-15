@@ -298,7 +298,7 @@ function normalizeEonetEvent(item: Record<string, unknown>): NormalizedReport {
     latitude: location?.latitude,
     longitude: location?.longitude,
     eventTime,
-    detectedTime: nowIso(),
+    detectedTime: eventTime,
     category,
     severity: inferSeverity(category, title, description),
     confidence: applyGeocodePenalty(0.82, location?.confidence ?? 1),

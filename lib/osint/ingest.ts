@@ -15,6 +15,7 @@ export type IngestResult = {
   rawReports: number;
   eventsCreated: number;
   eventsUpdated: number;
+  eventsArchived: number;
   skipped: number;
 };
 

@@ -35,7 +35,7 @@ function logResult(result: IngestResult) {
   process.stdout.write(
     `[worker] ${new Date().toISOString()} ${result.source}: ` +
       `${result.fetchedReports} fetched, ${result.eventsCreated} new, ` +
-      `${result.eventsUpdated} updated, mode=${result.mode}` +
+      `${result.eventsUpdated} updated, ${result.eventsArchived} archived, mode=${result.mode}` +
       `${result.warning ? `, warning=${result.warning}` : ""}\n`
   );
 }

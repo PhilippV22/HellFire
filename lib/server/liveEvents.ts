@@ -1,4 +1,5 @@
 import { createCivilImpactAnalysis } from "@/lib/osint/impact";
+import { isEventFresh } from "@/lib/eventLifecycle";
 import {
   fetchNormalizedReports,
   productionSourceIds
@@ -18,7 +19,7 @@ type GlobalWithLiveCache = typeof globalThis & {
 };
 
 const cacheTtlMs = 10 * 60 * 1000;
-const cacheVersion = "production-live-v4-conflict-overlays";
+const cacheVersion = "production-live-v6-archive-anchor";
 
 export async function getLiveProductionEvents() {
   const globalWithCache = globalThis as GlobalWithLiveCache;
@@ -71,6 +72,10 @@ function clusterLiveReports(reports: NormalizedReport[]) {
 
   for (const report of reports) {
     if (typeof report.latitude !== "number" || typeof report.longitude !== "number") {
+      continue;
+    }
+
+    if (!isEventFresh(report)) {
       continue;
     }
 

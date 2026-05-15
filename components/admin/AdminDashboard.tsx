@@ -189,6 +189,7 @@ function AdminEventCard({
             <option value="unreviewed">unreviewed</option>
             <option value="confirmed">confirmed</option>
             <option value="rejected">rejected</option>
+            <option value="archived">archived</option>
           </select>
         </label>
         <label className="text-xs text-slate-300">

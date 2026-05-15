@@ -105,8 +105,23 @@ export function MapView({
       element.className = "event-marker";
       element.dataset.active = String(event.id === selectedEvent?.id);
       element.style.borderColor = meta.markerColor;
-      element.textContent = meta.icon;
+      element.setAttribute("aria-label", event.title);
+      element.style.setProperty("--marker-color", meta.markerColor);
       element.title = `${event.title} · ${event.locationName}`;
+
+      if (meta.assetPath) {
+        const icon = document.createElement("img");
+        icon.src = meta.assetPath;
+        icon.alt = "";
+        icon.className = "event-marker-icon";
+        element.appendChild(icon);
+      } else {
+        const icon = document.createElement("span");
+        icon.className = "event-marker-symbol";
+        icon.textContent = meta.icon;
+        element.appendChild(icon);
+      }
+
       element.addEventListener("click", () => onSelectEvent(event));
 
       const popup = new maplibregl.Popup({ offset: 24 }).setHTML(

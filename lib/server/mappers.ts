@@ -34,6 +34,7 @@ export function mapEventRow(row: DbRow, sources: CrisisSource[] = []): CrisisEve
     sourceCount: numberValue(row.source_count),
     rawReportCount: numberValue(row.raw_report_count),
     geocodeConfidence: numberValue(row.geocode_confidence),
+    archivedAt: optionalDateIso(row.archived_at),
     updatedAt: dateIso(row.updated_at)
   };
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import {
   useCallback,
   useEffect,
@@ -117,12 +118,13 @@ export function EarthGlobe({
   const focusEvent = useCallback((event: CrisisEvent) => {
     const earthGroup = earthGroupRef.current;
     const controls = controlsRef.current;
+    const camera = cameraRef.current;
 
-    if (!earthGroup || !controls) {
+    if (!earthGroup || !controls || !camera) {
       return;
     }
 
-    targetQuaternionRef.current = getFocusQuaternion(event);
+    targetQuaternionRef.current = getFocusQuaternion(event, camera);
     targetCameraDistanceRef.current = 2.16;
     wheelFocusRef.current = {
       latitude: event.latitude,
@@ -434,7 +436,7 @@ export function EarthGlobe({
     const initialSelectedEvent = initialSelectedEventRef.current;
 
     if (initialSelectedEvent) {
-      targetQuaternionRef.current = getFocusQuaternion(initialSelectedEvent);
+      targetQuaternionRef.current = getFocusQuaternion(initialSelectedEvent, camera);
       targetCameraDistanceRef.current = 2.16;
       wheelFocusRef.current = {
         latitude: initialSelectedEvent.latitude,
@@ -611,7 +613,21 @@ export function EarthGlobe({
               } as CSSProperties}
               onClick={() => onSelectEvent(event)}
             >
-              <span className="earth-event-marker-core" />
+              <span className="earth-event-marker-shell">
+                {meta.assetPath ? (
+                  <Image
+                    src={meta.assetPath}
+                    alt=""
+                    width={24}
+                    height={24}
+                    className="earth-event-marker-icon"
+                  />
+                ) : (
+                  <span className="earth-event-marker-symbol" aria-hidden>
+                    {meta.icon}
+                  </span>
+                )}
+              </span>
               <span className="sr-only">{event.title}</span>
             </button>
           );
@@ -1218,15 +1234,18 @@ function disposeScene(scene: THREE.Scene) {
   });
 }
 
-function getFocusQuaternion(event: CrisisEvent) {
+function getFocusQuaternion(
+  event: CrisisEvent,
+  camera: THREE.PerspectiveCamera
+) {
   const localPosition = latLngToVector3(
     event.latitude,
     event.longitude,
     globeRadius
   ).normalize();
-  const front = new THREE.Vector3(0, 0, 1);
+  const cameraDirection = camera.position.clone().normalize();
 
-  return new THREE.Quaternion().setFromUnitVectors(localPosition, front);
+  return new THREE.Quaternion().setFromUnitVectors(localPosition, cameraDirection);
 }
 
 function getMarkerPositions(

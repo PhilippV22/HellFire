@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS events (
   event_time TIMESTAMPTZ NOT NULL,
   detected_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   status TEXT NOT NULL DEFAULT 'unreviewed' CHECK (
-    status IN ('unreviewed', 'confirmed', 'rejected')
+    status IN ('unreviewed', 'confirmed', 'rejected', 'archived')
   ),
   geocode_confidence NUMERIC(4, 3) NOT NULL DEFAULT 1 CHECK (
     geocode_confidence >= 0 AND geocode_confidence <= 1
@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS events (
   civil_impact TEXT NOT NULL,
   source_count INTEGER NOT NULL DEFAULT 1,
   raw_report_count INTEGER NOT NULL DEFAULT 1,
+  archived_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -132,6 +133,7 @@ CREATE TABLE IF NOT EXISTS analysis_notes (
 CREATE INDEX IF NOT EXISTS events_geom_idx ON events USING GIST (geom);
 CREATE INDEX IF NOT EXISTS events_category_idx ON events (category);
 CREATE INDEX IF NOT EXISTS events_status_idx ON events (status);
+CREATE INDEX IF NOT EXISTS events_archived_at_idx ON events (archived_at DESC);
 CREATE INDEX IF NOT EXISTS events_country_region_idx ON events (country, region);
 CREATE INDEX IF NOT EXISTS events_event_time_idx ON events (event_time DESC);
 CREATE INDEX IF NOT EXISTS events_title_trgm_idx ON events USING GIN (title gin_trgm_ops);
