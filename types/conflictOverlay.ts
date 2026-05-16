@@ -28,9 +28,28 @@ export type ConflictFrontlineOverlay = {
   description: string;
 };
 
+export type ConflictAdminRegionStatus =
+  | "occupied-majority"
+  | "conflict-affected";
+
+export type ConflictAdminRegionOverlay = {
+  id: string;
+  name: string;
+  country: string;
+  status: ConflictAdminRegionStatus;
+  rings: GeoPoint[][];
+  occupationPercent?: number;
+  eventCount: number;
+  confidence: number;
+  updatedAt: string;
+  source: string;
+  description: string;
+};
+
 export type ConflictOverlayData = {
   countries: ConflictCountryOverlay[];
   borderLines: ConflictBorderLine[];
+  adminRegions: ConflictAdminRegionOverlay[];
   frontlines: ConflictFrontlineOverlay[];
   updatedAt: string;
   mode: "public-approximation";

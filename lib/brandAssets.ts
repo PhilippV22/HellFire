@@ -27,6 +27,11 @@ export const hellfireBrandAssets = {
     rail: "/brand/hellfire/categories/rail.png",
     water: "/brand/hellfire/categories/water.png",
     communication: "/brand/hellfire/categories/communication.png",
+    earthquake: "/brand/hellfire/categories/earthquake.svg",
+    disaster: "/brand/hellfire/categories/disaster.svg",
+    protest: "/brand/hellfire/categories/protest.svg",
+    conflict: "/brand/hellfire/categories/conflict.svg",
+    health: "/brand/hellfire/categories/health.svg",
     unverified: "/brand/hellfire/categories/unverified.png"
   },
   sourceSheet: "/brand/hellfire/source/logo-set.png"

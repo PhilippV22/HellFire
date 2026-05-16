@@ -63,6 +63,22 @@ body {
   pointer-events: none;
 }
 
+.earth-event-marker-approximate {
+  border-style: dashed;
+  opacity: 0.86;
+}
+
+.earth-event-marker-approximate::before {
+  position: absolute;
+  width: 54px;
+  height: 54px;
+  border: 1px dashed color-mix(in srgb, var(--marker-color) 58%, transparent);
+  border-radius: 999px;
+  content: "";
+  opacity: 0.65;
+  pointer-events: none;
+}
+
 .earth-event-marker-shell {
   position: relative;
   z-index: 1;
@@ -171,6 +187,14 @@ body {
   transition:
     transform 160ms ease,
     box-shadow 160ms ease;
+}
+
+.event-marker[data-quality="approximate"] {
+  border-style: dashed;
+  opacity: 0.86;
+  box-shadow:
+    0 0 0 6px color-mix(in srgb, var(--marker-color) 18%, transparent),
+    0 8px 28px rgba(0, 0, 0, 0.45);
 }
 
 .event-marker-icon {

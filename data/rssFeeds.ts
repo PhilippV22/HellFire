@@ -3,6 +3,8 @@ export type RssFeedConfig = {
   name: string;
   url: string;
   defaultCategoryHint: string;
+  sourceCountry?: string;
+  sourceLanguage?: string;
 };
 
 export const publicCrisisRssFeeds: RssFeedConfig[] = [
@@ -23,5 +25,53 @@ export const publicCrisisRssFeeds: RssFeedConfig[] = [
     name: "BBC World RSS",
     url: "https://feeds.bbci.co.uk/news/world/rss.xml",
     defaultCategoryHint: "world news crisis disaster protest conflict"
+  },
+  {
+    id: "tass-en",
+    name: "TASS",
+    url: "https://tass.com/rss/v2.xml",
+    defaultCategoryHint: "world news crisis disaster protest conflict infrastructure",
+    sourceCountry: "Russia",
+    sourceLanguage: "en"
+  },
+  {
+    id: "interfax-ru",
+    name: "Interfax",
+    url: "https://www.interfax.ru/rss.asp",
+    defaultCategoryHint: "world news crisis disaster protest conflict infrastructure",
+    sourceCountry: "Russia",
+    sourceLanguage: "ru"
+  },
+  {
+    id: "xinhua-world-en",
+    name: "Xinhua World",
+    url: "https://english.news.cn/rss/worldrss.xml",
+    defaultCategoryHint: "world news crisis disaster protest conflict infrastructure",
+    sourceCountry: "China",
+    sourceLanguage: "en"
+  },
+  {
+    id: "cgtn-world-en",
+    name: "CGTN World",
+    url: "https://www.cgtn.com/subscribe/rss/section/world.xml",
+    defaultCategoryHint: "world news crisis disaster protest conflict infrastructure",
+    sourceCountry: "China",
+    sourceLanguage: "en"
+  },
+  {
+    id: "china-daily-world-en",
+    name: "China Daily World",
+    url: "https://www.chinadaily.com.cn/rss/world_rss.xml",
+    defaultCategoryHint: "world news crisis disaster protest conflict infrastructure",
+    sourceCountry: "China",
+    sourceLanguage: "en"
+  },
+  {
+    id: "peoples-daily-world-en",
+    name: "People's Daily Online World",
+    url: "https://en.people.cn/rss/World.xml",
+    defaultCategoryHint: "world news crisis disaster protest conflict infrastructure",
+    sourceCountry: "China",
+    sourceLanguage: "en"
   }
 ];

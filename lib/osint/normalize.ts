@@ -1,4 +1,5 @@
 import { resolveLocation } from "@/lib/osint/gazetteer";
+import { isLikelyNonEventText } from "@/lib/eventQuality";
 import type { EventCategory, RawReport } from "@/types/events";
 
 export type SourceId =
@@ -36,31 +37,27 @@ export function normalizeSourcePayload(
   sourceId: SourceId,
   payload: unknown
 ): NormalizedReport[] {
+  let reports: NormalizedReport[];
+
   if (sourceId === "gdelt") {
-    return getPayloadItems(payload).map((item) => normalizeGdeltReport(item));
-  }
-
-  if (sourceId === "gdelt-doc") {
-    return getPayloadItems(payload).map((item) => normalizeGdeltDocArticle(item));
-  }
-
-  if (sourceId === "reliefweb") {
-    return getPayloadItems(payload).map((item) => normalizeReliefWebReport(item));
-  }
-
-  if (sourceId === "usgs" || sourceId === "emsc") {
-    return getGeoJsonFeatures(payload).map((item) =>
+    reports = getPayloadItems(payload).map((item) => normalizeGdeltReport(item));
+  } else if (sourceId === "gdelt-doc") {
+    reports = getPayloadItems(payload).map((item) => normalizeGdeltDocArticle(item));
+  } else if (sourceId === "reliefweb") {
+    reports = getPayloadItems(payload).map((item) => normalizeReliefWebReport(item));
+  } else if (sourceId === "usgs" || sourceId === "emsc") {
+    reports = getGeoJsonFeatures(payload).map((item) =>
       normalizeEarthquakeFeature(item, sourceId)
+    );
+  } else if (sourceId === "eonet") {
+    reports = getPayloadItems(payload).map((item) => normalizeEonetEvent(item));
+  } else {
+    reports = getPayloadItems(payload).map((item) =>
+      normalizeRssItem(item, sourceId)
     );
   }
 
-  if (sourceId === "eonet") {
-    return getPayloadItems(payload).map((item) => normalizeEonetEvent(item));
-  }
-
-  return getPayloadItems(payload).map((item) =>
-    normalizeRssItem(item, sourceId)
-  );
+  return reports.filter(isActionableReport);
 }
 
 function normalizeGdeltReport(item: Record<string, unknown>): NormalizedReport {
@@ -94,6 +91,7 @@ function normalizeGdeltReport(item: Record<string, unknown>): NormalizedReport {
   const category = classifyCategory([title, description, String(item.themes || "")]);
   const location = resolveLocation({ country, region, placeName, latitude, longitude });
   const confidence = applyGeocodePenalty(baseConfidence("gdelt", category), location?.confidence);
+  const imageCandidates = extractImageCandidates(item, title, description);
 
   return {
     sourceId: "gdelt",
@@ -114,7 +112,7 @@ function normalizeGdeltReport(item: Record<string, unknown>): NormalizedReport {
     confidence,
     geocodeConfidence: location?.confidence ?? 0.25,
     rawPayload: item,
-    normalizedPayload: { title, category, source: "gdelt" }
+    normalizedPayload: { title, category, source: "gdelt", imageCandidates }
   };
 }
 
@@ -136,6 +134,7 @@ function normalizeGdeltDocArticle(item: Record<string, unknown>): NormalizedRepo
     baseConfidence("gdelt-doc", category),
     location?.confidence
   );
+  const imageCandidates = extractImageCandidates(item, title, description);
 
   return {
     sourceId: "gdelt-doc",
@@ -156,7 +155,7 @@ function normalizeGdeltDocArticle(item: Record<string, unknown>): NormalizedRepo
     confidence,
     geocodeConfidence: location?.confidence ?? 0.25,
     rawPayload: item,
-    normalizedPayload: { title, category, source: "gdelt-doc" }
+    normalizedPayload: { title, category, source: "gdelt-doc", imageCandidates }
   };
 }
 
@@ -189,6 +188,7 @@ function normalizeReliefWebReport(item: Record<string, unknown>): NormalizedRepo
     baseConfidence("reliefweb", category),
     location?.confidence
   );
+  const imageCandidates = extractImageCandidates(fields, title, description);
 
   return {
     sourceId: "reliefweb",
@@ -209,7 +209,7 @@ function normalizeReliefWebReport(item: Record<string, unknown>): NormalizedRepo
     confidence,
     geocodeConfidence: location?.confidence ?? 0.25,
     rawPayload: item,
-    normalizedPayload: { title, category, source: "reliefweb" }
+    normalizedPayload: { title, category, source: "reliefweb", imageCandidates }
   };
 }
 
@@ -284,6 +284,7 @@ function normalizeEonetEvent(item: Record<string, unknown>): NormalizedReport {
   const placeName = extractPlaceFromText(title);
   const location = resolveLocation({ placeName, latitude, longitude });
   const eventTime = dateString(latestGeometry.date) || nowIso();
+  const imageCandidates = extractImageCandidates(item, title, description);
 
   return {
     sourceId: "eonet",
@@ -304,7 +305,7 @@ function normalizeEonetEvent(item: Record<string, unknown>): NormalizedReport {
     confidence: applyGeocodePenalty(0.82, location?.confidence ?? 1),
     geocodeConfidence: location?.confidence ?? 1,
     rawPayload: item,
-    normalizedPayload: { title, category, source: "eonet" }
+    normalizedPayload: { title, category, source: "eonet", imageCandidates }
   };
 }
 
@@ -329,29 +330,40 @@ function normalizeRssItem(
     numberValue(point?.["geo:long"]) ??
     numberValue(item["geo:long"]) ??
     (Number.isFinite(georssLon) ? georssLon : undefined);
-  const country =
-    stringValue(item["gdacs:country"]) ||
-    extractCountryFromText(title) ||
-    extractCountryFromText(description);
+  const gdacsCountry = stringValue(item["gdacs:country"]);
   const region = stringValue(item.region);
   const placeName =
     stringValue(item["gdacs:eventname"]) ||
     extractPlaceFromText(title) ||
-    country;
-  const category = classifyCategory([
-    title,
-    description,
-    stringValue(item.categoryHint),
-    stringValue(item["gdacs:eventtype"])
-  ]);
+    extractPlaceFromText(description) ||
+    gdacsCountry ||
+    extractCountryFromText(title) ||
+    extractCountryFromText(description);
+  const country =
+    gdacsCountry ||
+    resolveLocation({ placeName })?.country ||
+    extractCountryFromText(title) ||
+    extractCountryFromText(description);
+  const inferredCategory = classifyCategory(
+    sourceId === "gdacs"
+      ? [title, description, stringValue(item["gdacs:eventtype"])]
+      : [title, description]
+  );
+  const category =
+    sourceId === "conflict-news" && inferredCategory === "incident"
+      ? "conflict"
+      : inferredCategory;
   const location = resolveLocation({ country, region, placeName, latitude, longitude });
   const eventTime =
     dateString(item["gdacs:fromdate"]) ||
     dateString(item.pubDate) ||
+    dateString(item.pubdate) ||
     dateString(item.isoDate) ||
+    dateString(item.date) ||
     nowIso();
   const feedName = stringValue(item.feedName) || sourceNames[sourceId];
   const sourceCountry = stringValue(item.sourceCountry);
+  const imageCandidates = extractImageCandidates(item, title, description);
 
   return {
     sourceId,
@@ -370,7 +382,7 @@ function normalizeRssItem(
     latitude: location?.latitude,
     longitude: location?.longitude,
     eventTime,
-    detectedTime: dateString(item.pubDate) || nowIso(),
+    detectedTime: dateString(item.pubDate) || dateString(item.pubdate) || nowIso(),
     category,
     severity: severityFromRss(category, item, title, description),
     confidence: applyGeocodePenalty(
@@ -385,7 +397,8 @@ function normalizeRssItem(
       source: sourceId,
       feedName,
       sourceCountry,
-      sourceLanguage: stringValue(item.sourceLanguage)
+      sourceLanguage: stringValue(item.sourceLanguage),
+      imageCandidates
     }
   };
 }
@@ -410,6 +423,58 @@ function getPayloadItems(payload: unknown): Record<string, unknown>[] {
   return [payload];
 }
 
+function isActionableReport(report: NormalizedReport) {
+  if (report.category === "earthquake") {
+    return true;
+  }
+
+  const text = `${report.title} ${report.description}`;
+
+  if (isLikelyNonEventText(text)) {
+    return false;
+  }
+
+  if (
+    report.sourceId === "conflict-news" &&
+    !hasAcuteEventTerms(text) &&
+    !hasRelevantConflictContext(text)
+  ) {
+    return false;
+  }
+
+  if (
+    report.sourceId === "rss" &&
+    report.category === "incident" &&
+    !hasAcuteEventTerms(text)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function hasAcuteEventTerms(text: string) {
+  return (
+    /\b(killed|injured|dead|attack|strike|airstrike|shelling|missile|rocket|drone|explosion|bombing|clash|fighting|ceasefire|evacuat|refugee|earthquake|flood|wildfire|fire|storm|cyclone|hurricane|outbreak|protest|blackout|collapse|shortage|drought|war)\b/i.test(
+      text
+    ) ||
+    /(удар|обстрел|обстріл|ракета|дрон|атака|взрыв|вибух|загиб|погиб|ранен|поранен|эвакуац|евакуац|беженц|біженц|наступ|фронт|окупац|оккупац)/i.test(
+      text
+    )
+  );
+}
+
+function hasRelevantConflictContext(text: string) {
+  return (
+    /\b(sanction|refugee|evacuat|humanitarian|front line|frontline|war crimes|prisoner swap|hostage|aid convoy|occupation|peacekeeping)\b/i.test(
+      text
+    ) ||
+    /(санкц|гуманитар|гуманітар|фронт|пленные|полонен|заложник|заручник|оккупац|окупац)/i.test(
+      text
+    )
+  );
+}
+
 function getGeoJsonFeatures(payload: unknown): Record<string, unknown>[] {
   if (!isRecord(payload)) {
     return [];
@@ -427,16 +492,19 @@ function classifyCategory(parts: string[]): EventCategory {
   if (/(flood|storm|wildfire|\bfire\b|heatwave|cyclone|hurricane|disaster|landslide|volcano|drought)/.test(text)) {
     return "disaster";
   }
-  if (/(war|conflict|clash|violence|shelling|attack|airstrike|air strike|missile strike|drone strike|missile|rocket|drone|ceasefire|invasion|occupation|offensive|frontline|bombardment|hostage|security incident)/.test(text)) {
+  if (/(health|disease|cholera|ebola|outbreak|heat stress)/.test(text)) return "health";
+  if (
+    /\b(war|conflict|clash|violence|shelling|attack|attacks|airstrike|air strike|missile strike|drone strike|missile|rocket|drone|ceasefire|invasion|occupation|offensive|frontline|bombardment|hostage|security incident)\b/.test(text) ||
+    /(войн|війна|конфликт|конфлікт|удар|обстрел|обстріл|ракета|дрон|атака|наступ|оккупац|окупац|фронт)/.test(text)
+  ) {
     return "conflict";
   }
-  if (/(protest|demonstration|strike|unrest|rally)/.test(text)) return "protest";
+  if (/\b(protest|demonstration|strike action|labor strike|unrest|rally)\b/.test(text)) return "protest";
   if (/(hospital|clinic|medical capacity)/.test(text)) return "hospital";
-  if (/(health|disease|cholera|outbreak|heat stress)/.test(text)) return "health";
   if (/(power|electric|grid|blackout)/.test(text)) return "power";
   if (/(oil|fuel|terminal|pipeline)/.test(text)) return "oil";
   if (/(bridge|overpass)/.test(text)) return "bridge";
-  if (/(rail|train|metro|transit)/.test(text)) return "rail";
+  if (/\b(rail|train|metro|transit)\b/.test(text)) return "rail";
   if (/(water|sanitation|pump|drinking)/.test(text)) return "water";
   if (/(communication|telecom|mobile network|internet)/.test(text)) {
     return "communication";
@@ -473,18 +541,13 @@ function extractPlaceFromText(text: string) {
     return knownPlace;
   }
 
-  const separators = [" in ", " near ", " at ", " - ", ", "];
   const match = text.match(/\b(?:in|near|at)\s+([A-Z][A-Za-z .'-]+(?:,\s*[A-Z][A-Za-z .'-]+)?)/);
 
-  if (match?.[1]) {
-    return match[1].trim();
-  }
+  if (match?.[1] && isUsablePlaceCandidate(match[1])) {
+    const candidate = match[1].trim();
 
-  for (const separator of separators) {
-    const index = text.lastIndexOf(separator);
-
-    if (index >= 0) {
-      return text.slice(index + separator.length).replace(/\s+\d{1,2}\/\d{1,2}\/\d{4}.*$/, "").trim();
+    if (resolveLocation({ placeName: candidate })) {
+      return candidate;
     }
   }
 
@@ -493,16 +556,40 @@ function extractPlaceFromText(text: string) {
 
 function extractKnownPlaceFromText(text: string) {
   const knownPlaces: Array<[RegExp, string]> = [
-    [/\bkyiv\b|\bkiev\b/i, "Kyiv"],
-    [/\bkharkiv\b/i, "Kharkiv"],
-    [/\bdonetsk\b/i, "Donetsk"],
-    [/\bluhansk\b/i, "Luhansk"],
-    [/\bkherson\b/i, "Kherson"],
-    [/\bzaporizhzhia\b|\bzaporizhia\b/i, "Zaporizhzhia"],
-    [/\bodesa\b|\bodessa\b/i, "Odesa"],
-    [/\bcrimea\b|\bcrimean\b/i, "Crimea"],
-    [/\bbelgorod\b/i, "Belgorod"],
-    [/\bkursk\b/i, "Kursk"],
+    [/\bkyiv\b|\bkiev\b|киев|київ/i, "Kyiv"],
+    [/\bkharkiv\b|харьков|харків/i, "Kharkiv"],
+    [/\bdonetsk\b|донецк|донецьк/i, "Donetsk"],
+    [/\bluhansk\b|луганск|луганськ/i, "Luhansk"],
+    [/\bkherson\b|херсон/i, "Kherson"],
+    [/\bzaporizhzhia\b|\bzaporizhia\b|запорож|запоріж/i, "Zaporizhzhia"],
+    [/\bodesa\b|\bodessa\b|одес[саи]/i, "Odesa"],
+    [/\bdnipropetrovsk\b|\bdnipro\b|днепр|дніпро|днепропетровск|дніпропетровськ/i, "Dnipro"],
+    [/\bkryvyi rih\b|\bkrivoy rog\b|кривой рог|кривий ріг/i, "Kryvyi Rih"],
+    [/\bnikopol\b|никопол|нікопол/i, "Nikopol"],
+    [/\bpoltava\b|полтава/i, "Poltava"],
+    [/\bsumy\b|сумы|суми/i, "Sumy"],
+    [/\bkupiansk\b|\bkupyansk\b|купянск|купʼянськ|купянськ/i, "Kupiansk"],
+    [/\bryazan\b|рязань/i, "Ryazan"],
+    [/\bpokrovsk\b|покровск|покровськ/i, "Pokrovsk"],
+    [/\bkramatorsk\b|краматорск|краматорськ/i, "Kramatorsk"],
+    [/\bsloviansk\b|\bslovyansk\b|славянск|словʼянськ|словянськ/i, "Sloviansk"],
+    [/\btoretsk\b|торецк|торецьк/i, "Toretsk"],
+    [/\bchasiv yar\b|часов яр|часів яр/i, "Chasiv Yar"],
+    [/\bbakhmut\b|бахмут/i, "Bakhmut"],
+    [/\bavdiivka\b|\bavdeevka\b|авдеевка|авдіївка/i, "Avdiivka"],
+    [/\bmariupol\b|мариупол|маріупол/i, "Mariupol"],
+    [/\bmelitopol\b|мелитопол|мелітопол/i, "Melitopol"],
+    [/\bberdyansk\b|бердянск|бердянськ/i, "Berdyansk"],
+    [/\bzaporozhye npp\b|\bzaporizhzhia npp\b|\bzaporizhia npp\b|запорожской аэс|запорізьк[а-яіїє'’ ]+аес/i, "Zaporizhzhia"],
+    [/\bcrimea\b|\bcrimean\b|крым|крим/i, "Crimea"],
+    [/\bbelgorod\b|белгород/i, "Belgorod"],
+    [/\bkursk\b|курск/i, "Kursk"],
+    [/\bstavropol\b|\bnevinnomyssk\b|ставропол|невинномысск/i, "Stavropol Krai"],
+    [/\bastrakhan\b|астрахан/i, "Astrakhan Region"],
+    [/\bsamsun\b|самсун/i, "Samsun"],
+    [/\bnanjing\b/i, "Nanjing"],
+    [/\bnorthern angola\b|\bn\. angola\b/i, "Northern Angola"],
+    [/\bangola\b/i, "Angola"],
     [/\bgaza\b/i, "Gaza"],
     [/\brafah\b/i, "Rafah"],
     [/\bkhan younis\b/i, "Khan Younis"],
@@ -517,6 +604,7 @@ function extractKnownPlaceFromText(text: string) {
     [/\bdarfur\b/i, "Darfur"],
     [/\bsanaa\b|\bsana'a\b/i, "Sanaa"],
     [/\brakhine\b/i, "Rakhine"],
+    [/\bdemocratic republic of the congo\b|\bdr congo\b|\bdrc\b|\bcongo\b/i, "Eastern Democratic Republic of the Congo"],
     [/\bkashmir\b/i, "Kashmir"]
   ];
   const match = knownPlaces.find(([pattern]) => pattern.test(text));
@@ -524,22 +612,44 @@ function extractKnownPlaceFromText(text: string) {
   return match?.[1] ?? "";
 }
 
+function isUsablePlaceCandidate(candidate: string) {
+  const normalized = candidate
+    .replace(/\s+\d{1,2}\/\d{1,2}\/\d{4}.*$/, "")
+    .trim();
+
+  if (!normalized || normalized.length > 54) {
+    return false;
+  }
+
+  if (!/[A-Z]/.test(normalized[0])) {
+    return false;
+  }
+
+  return !/\b(killed|injured|including|children|wants|war|minister|companies|tribunal|preparation|ongoing|warns|could|may|might|talks|tax|advertising|history|announces|extension|front line|world news|attacks|attack|drone|russian|israeli|across|airspace|months|crackdown|dissent|as|final)\b/i.test(
+    normalized
+  );
+}
+
 function extractCountryFromText(text: string) {
   const regionAliases: Array<[RegExp, string]> = [
     [/\bgaza\b|\brafah\b|\bkhan younis\b|\bwest bank\b|\bpalestin/i, "Palestinian Territories"],
-    [/\btel aviv\b|\bjerusalem\b|\bisrael/i, "Israel"],
-    [/\bkyiv\b|\bkiev\b|\bkharkiv\b|\bdonetsk\b|\bluhansk\b|\bkherson\b|\bzaporizhzhia\b|\bzaporizhia\b|\bcrimea\b|\bodesa\b|\bodessa\b|\bukrain/i, "Ukraine"],
-    [/\bmoscow\b|\bbelgorod\b|\bkursk\b|\brussia\b|\brussian\b/i, "Russia"],
     [/\bbeirut\b|\blebanon\b|\blebanese\b/i, "Lebanon"],
+    [/\bkyiv\b|\bkiev\b|\bkharkiv\b|\bdonetsk\b|\bluhansk\b|\bkherson\b|\bzaporizhzhia\b|\bzaporizhia\b|\bcrimea\b|\bodesa\b|\bodessa\b|\bdnipro\b|\bdnipropetrovsk\b|\bkryvyi rih\b|\bnikopol\b|\bpoltava\b|\bsumy\b|\bkupiansk\b|\bpokrovsk\b|\bkramatorsk\b|\bsloviansk\b|\btoretsk\b|\bchasiv yar\b|\bbakhmut\b|\bavdiivka\b|\bmariupol\b|\bmelitopol\b|\bberdyansk\b|\bukrain|киев|київ|харьков|харків|донецк|донецьк|луганск|луганськ|херсон|запорож|запоріж|крым|крим|одес[саи]|днепр|дніпро|кривой рог|кривий ріг|никопол|нікопол|полтава|сумы|суми|купянск|купянськ|покровск|покровськ|краматорск|краматорськ|славянск|словянськ|торецк|торецьк|часов яр|часів яр|бахмут|авдеевка|авдіївка|мариупол|маріупол|мелитопол|мелітопол|бердянск|бердянськ|украин|україн/i, "Ukraine"],
+    [/\bmoscow\b|\bbelgorod\b|\bkursk\b|\bryazan\b|\bstavropol\b|\bnevinnomyssk\b|\bastrakhan\b|\brussia\b|\brussian\b|москва|белгород|курск|рязань|ставропол|невинномысск|астрахан|росси|росія|росій/i, "Russia"],
+    [/\btel aviv\b|\bjerusalem\b|\bisrael/i, "Israel"],
     [/\bdamascus\b|\bsyria\b|\bsyrian\b/i, "Syria"],
     [/\btehran\b|\biran\b|\birani/i, "Iran"],
+    [/\bdemocratic republic of the congo\b|\bdr congo\b|\bdrc\b|\bcongo\b/i, "Democratic Republic of the Congo"],
     [/\bkhartoum\b|\bdarfur\b|\bsudan\b|\bsudanese\b/i, "Sudan"],
     [/\bsanaa\b|\byemen\b|\byemeni\b/i, "Yemen"],
     [/\bmyanmar\b|\bburma\b|\brakhine\b/i, "Myanmar"],
+    [/\bnanjing\b|\bchina\b|\bchinese\b/i, "China"],
+    [/\bnorthern angola\b|\bn\. angola\b|\bangola\b|\bangolan\b/i, "Angola"],
     [/\bkashmir\b|\bindia\b|\bindian\b/i, "India"],
     [/\bpakistan\b|\bpakistani\b/i, "Pakistan"],
     [/\bafghanistan\b|\bafghan\b/i, "Afghanistan"],
     [/\biraq\b|\biraqi\b/i, "Iraq"],
+    [/\bsamsun\b|\bturkey\b|\bturkish\b|самсун|турц|туреч/i, "Turkey"],
     [/\bsomalia\b|\bsomali\b/i, "Somalia"],
     [/\blibya\b|\blibyan\b/i, "Libya"],
     [/\bmali\b|\btuareg\b/i, "Mali"],
@@ -553,6 +663,7 @@ function extractCountryFromText(text: string) {
   }
 
   const knownCountries = [
+    "Angola",
     "Argentina",
     "Australia",
     "Afghanistan",
@@ -562,6 +673,7 @@ function extractCountryFromText(text: string) {
     "Canada",
     "Chile",
     "China",
+    "Democratic Republic of the Congo",
     "France",
     "Germany",
     "Haiti",
@@ -669,7 +781,8 @@ function dateString(value: unknown) {
   }
 
   if (typeof value === "string" && value.trim()) {
-    const compactDate = value.match(/^(\d{4})(\d{2})(\d{2})$/);
+    const trimmed = value.trim();
+    const compactDate = trimmed.match(/^(\d{4})(\d{2})(\d{2})$/);
 
     if (compactDate) {
       return new Date(
@@ -677,7 +790,7 @@ function dateString(value: unknown) {
       ).toISOString();
     }
 
-    const date = new Date(value);
+    const date = new Date(trimmed);
 
     if (!Number.isNaN(date.getTime())) {
       return date.toISOString();
@@ -709,6 +822,99 @@ function stripHtml(value: string) {
     .replace(/&amp;/g, "&")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+type SourceImageCandidate = {
+  url: string;
+  role: "map-or-situation-image" | "source-image";
+  confidence: number;
+  sourceField: string;
+};
+
+function extractImageCandidates(
+  record: Record<string, unknown>,
+  title: string,
+  description: string
+): SourceImageCandidate[] {
+  const candidates = new Map<string, SourceImageCandidate>();
+  const addCandidate = (url: string, sourceField: string) => {
+    const trimmedUrl = url.trim();
+
+    if (!/^https?:\/\//i.test(trimmedUrl) || candidates.has(trimmedUrl)) {
+      return;
+    }
+
+    const role = isMapLikeImage(trimmedUrl, title, description)
+      ? "map-or-situation-image"
+      : "source-image";
+
+    candidates.set(trimmedUrl, {
+      url: trimmedUrl,
+      role,
+      confidence: role === "map-or-situation-image" ? 0.58 : 0.34,
+      sourceField
+    });
+  };
+
+  for (const field of [
+    "image",
+    "imageUrl",
+    "imageurl",
+    "socialimage",
+    "thumbnail",
+    "urlToImage",
+    "og:image"
+  ]) {
+    addImageValue(record[field], field, addCandidate);
+  }
+
+  addImageValue(record["media:content"], "media:content", addCandidate);
+  addImageValue(record["media:thumbnail"], "media:thumbnail", addCandidate);
+  addImageValue(record.enclosure, "enclosure", addCandidate);
+  addImageValue(record.files, "files", addCandidate);
+  addImageValue(record.file, "file", addCandidate);
+
+  return Array.from(candidates.values()).slice(0, 8);
+}
+
+function addImageValue(
+  value: unknown,
+  sourceField: string,
+  addCandidate: (url: string, sourceField: string) => void
+) {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) =>
+      addImageValue(entry, `${sourceField}[${index}]`, addCandidate)
+    );
+    return;
+  }
+
+  if (typeof value === "string") {
+    addCandidate(value, sourceField);
+    return;
+  }
+
+  const record = recordValue(value);
+
+  if (!record) {
+    return;
+  }
+
+  for (const key of ["url", "@_url", "@url", "href", "@_href", "link"]) {
+    const url = stringValue(record[key]);
+
+    if (url) {
+      addCandidate(url, `${sourceField}.${key}`);
+    }
+  }
+}
+
+function isMapLikeImage(url: string, title: string, description: string) {
+  const text = `${url} ${title} ${description}`.toLowerCase();
+
+  return /map|satellite|imagery|perimeter|extent|footprint|boundary|floodplain|inundation|thermal|copernicus|situation|lagebild/.test(
+    text
+  );
 }
 
 function roundConfidence(value: number) {

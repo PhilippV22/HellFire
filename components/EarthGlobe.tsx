@@ -11,7 +11,7 @@ import {
 } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { categoryMeta } from "@/lib/eventMeta";
+import { getEventSubtype, getEventVisual, type EventSubtype } from "@/lib/eventVisuals";
 import type { ConflictOverlayData } from "@/types/conflictOverlay";
 import type { CrisisEvent } from "@/types/events";
 
@@ -78,6 +78,7 @@ export function EarthGlobe({
   const targetQuaternionRef = useRef<THREE.Quaternion | null>(null);
   const targetCameraDistanceRef = useRef<number | null>(null);
   const satelliteLayerRef = useRef<THREE.Group | null>(null);
+  const impactOverlayLayerRef = useRef<THREE.Group | null>(null);
   const conflictOverlayLayerRef = useRef<THREE.Group | null>(null);
   const conflictOverlayRef = useRef(conflictOverlay);
   const tileTextureCacheRef = useRef(new Map<string, THREE.Texture>());
@@ -105,6 +106,10 @@ export function EarthGlobe({
 
   useEffect(() => {
     eventsRef.current = events;
+
+    if (impactOverlayLayerRef.current) {
+      syncImpactOverlayLayer(impactOverlayLayerRef.current, events);
+    }
   }, [events]);
 
   useEffect(() => {
@@ -425,6 +430,12 @@ export function EarthGlobe({
     satelliteLayerRef.current = satelliteLayer;
     earthGroup.add(satelliteLayer);
 
+    const impactOverlayLayer = new THREE.Group();
+    impactOverlayLayer.name = "public-impact-area-layer";
+    impactOverlayLayerRef.current = impactOverlayLayer;
+    syncImpactOverlayLayer(impactOverlayLayer, eventsRef.current);
+    earthGroup.add(impactOverlayLayer);
+
     const conflictOverlayLayer = new THREE.Group();
     conflictOverlayLayer.name = "public-conflict-overlay-layer";
     conflictOverlayLayerRef.current = conflictOverlayLayer;
@@ -479,6 +490,7 @@ export function EarthGlobe({
       applyAdaptiveControlSensitivity(controls, camera.position.length());
       controls.update();
       updateSatelliteTileLayer(camera, earth, satelliteLayer);
+      animateImpactEffects(impactOverlayLayer, performance.now());
       renderer.render(scene, camera);
       setMarkerPositions(
         getMarkerPositions(mountElement, camera, earthGroup, eventsRef.current)
@@ -512,6 +524,7 @@ export function EarthGlobe({
       controlsRef.current = null;
       earthGroupRef.current = null;
       satelliteLayerRef.current = null;
+      impactOverlayLayerRef.current = null;
       conflictOverlayLayerRef.current = null;
     };
   }, [updateSatelliteTileLayer]);
@@ -593,8 +606,12 @@ export function EarthGlobe({
             return null;
           }
 
-          const meta = categoryMeta[event.category];
+          const meta = getEventVisual(event);
           const selected = event.id === selectedEventId;
+          const approximate =
+            event.qualityFlags?.includes("approximate-location") ||
+            event.locationPrecision === "country" ||
+            event.locationPrecision === "approximate";
 
           return (
             <button
@@ -603,7 +620,7 @@ export function EarthGlobe({
               title={`${event.title} · ${event.locationName}`}
               className={`earth-event-marker pointer-events-auto ${
                 selected ? "earth-event-marker-active" : ""
-              }`}
+              } ${approximate ? "earth-event-marker-approximate" : ""}`}
               style={{
                 "--marker-color": meta.markerColor,
                 left: `${marker.x}px`,
@@ -1093,6 +1110,458 @@ function createSurfaceLine(
   return new THREE.Line(geometry, material);
 }
 
+type ImpactAreaKind = Exclude<EventSubtype, "other">;
+
+type ImpactArea = SurfaceFocus & {
+  kind: ImpactAreaKind;
+  majorDegrees: number;
+  minorDegrees: number;
+  rotationDegrees: number;
+  color: string;
+  opacity: number;
+  severity: number;
+  confidence: number;
+};
+
+function syncImpactOverlayLayer(layer: THREE.Group, events: CrisisEvent[]) {
+  disposeChildren(layer);
+  layer.clear();
+
+  const overlay = createImpactOverlayLayer(events);
+
+  if (overlay.children.length > 0) {
+    layer.add(overlay);
+  }
+}
+
+function createImpactOverlayLayer(events: CrisisEvent[]) {
+  const group = new THREE.Group();
+  group.name = "public-impact-areas";
+
+  for (const event of events.slice(0, 120)) {
+    const area = inferImpactArea(event);
+
+    if (!area) {
+      continue;
+    }
+
+    const eventGroup = new THREE.Group();
+    eventGroup.name = `impact-area-${event.id}`;
+    eventGroup.add(createImpactSurfacePatch(area));
+    eventGroup.add(createImpactOutline(area));
+
+    if (area.kind === "wildfire") {
+      eventGroup.add(createWildfireEffects(event, area));
+    }
+
+    group.add(eventGroup);
+  }
+
+  return group;
+}
+
+function inferImpactArea(event: CrisisEvent): ImpactArea | null {
+  const subtype = getEventSubtype(event);
+
+  if (subtype === "other") {
+    return null;
+  }
+
+  if (subtype === "generic-disaster" && event.severity < 3) {
+    return null;
+  }
+
+  const severity = THREE.MathUtils.clamp(event.severity, 1, 5);
+  const { majorDegrees, minorDegrees, opacity } = getImpactAreaSize(
+    subtype,
+    severity,
+    event.confidence
+  );
+  const rotationDegrees = getStableAngle(`${event.id}:${event.title}:${subtype}`);
+  const visual = getEventVisual(event);
+
+  return {
+    kind: subtype,
+    latitude: event.latitude,
+    longitude: event.longitude,
+    majorDegrees,
+    minorDegrees,
+    rotationDegrees,
+    color: visual.markerColor,
+    opacity,
+    severity,
+    confidence: event.confidence
+  };
+}
+
+function getImpactAreaSize(
+  kind: ImpactAreaKind,
+  severity: number,
+  confidence: number
+) {
+  const uncertainty = confidence < 0.45 ? 1.35 : confidence < 0.65 ? 1.16 : 1;
+
+  if (kind === "wildfire") {
+    return {
+      majorDegrees: Math.min((0.22 + severity * 0.18) * uncertainty, 1.45),
+      minorDegrees: Math.min((0.1 + severity * 0.075) * uncertainty, 0.72),
+      opacity: 0.24
+    };
+  }
+
+  if (kind === "flood") {
+    return {
+      majorDegrees: Math.min((0.34 + severity * 0.22) * uncertainty, 2.1),
+      minorDegrees: Math.min((0.08 + severity * 0.055) * uncertainty, 0.58),
+      opacity: 0.22
+    };
+  }
+
+  if (kind === "tsunami") {
+    return {
+      majorDegrees: Math.min((0.72 + severity * 0.32) * uncertainty, 3.2),
+      minorDegrees: Math.min((0.12 + severity * 0.07) * uncertainty, 0.82),
+      opacity: 0.2
+    };
+  }
+
+  if (kind === "storm") {
+    return {
+      majorDegrees: Math.min((0.72 + severity * 0.36) * uncertainty, 3.4),
+      minorDegrees: Math.min((0.38 + severity * 0.22) * uncertainty, 2.1),
+      opacity: 0.16
+    };
+  }
+
+  if (kind === "earthquake") {
+    const radiusDegrees = Math.min((0.24 + severity * 0.22) * uncertainty, 1.75);
+
+    return {
+      majorDegrees: radiusDegrees,
+      minorDegrees: radiusDegrees,
+      opacity: 0.18
+    };
+  }
+
+  return {
+    majorDegrees: Math.min((0.22 + severity * 0.14) * uncertainty, 1.25),
+    minorDegrees: Math.min((0.16 + severity * 0.1) * uncertainty, 0.92),
+    opacity: 0.18
+  };
+}
+
+function createImpactSurfacePatch(area: ImpactArea) {
+  const geometry = createSurfaceEllipseGeometry(area, 0.004, 10, 72);
+  const material = new THREE.MeshBasicMaterial({
+    color: area.color,
+    transparent: true,
+    opacity: area.opacity,
+    side: THREE.DoubleSide,
+    depthWrite: false
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.name = `${area.kind}-estimated-public-impact-patch`;
+  mesh.renderOrder = 5;
+
+  return mesh;
+}
+
+function createImpactOutline(area: ImpactArea) {
+  const points = createEllipseSurfacePoints(area, 1, 0.006, 96, true);
+  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+  const material = new THREE.LineBasicMaterial({
+    color: area.color,
+    transparent: true,
+    opacity: Math.min(area.opacity + 0.28, 0.62),
+    linewidth: 1,
+    depthWrite: false
+  });
+  const line = new THREE.Line(geometry, material);
+  line.name = `${area.kind}-estimated-public-impact-outline`;
+  line.renderOrder = 6;
+
+  return line;
+}
+
+function createSurfaceEllipseGeometry(
+  area: ImpactArea,
+  altitude: number,
+  radialSegments: number,
+  angularSegments: number
+) {
+  const positions: number[] = [];
+  const indices: number[] = [];
+  const frame = getSurfaceFrame(area.latitude, area.longitude);
+  const center = frame.normal.clone().multiplyScalar(globeRadius + altitude);
+
+  positions.push(center.x, center.y, center.z);
+
+  for (let ringIndex = 1; ringIndex <= radialSegments; ringIndex += 1) {
+    const ringScale = ringIndex / radialSegments;
+
+    for (let segmentIndex = 0; segmentIndex < angularSegments; segmentIndex += 1) {
+      const angle = (segmentIndex / angularSegments) * Math.PI * 2;
+      const point = getEllipseSurfacePoint(area, frame, ringScale, angle, altitude);
+      positions.push(point.x, point.y, point.z);
+    }
+  }
+
+  for (let segmentIndex = 0; segmentIndex < angularSegments; segmentIndex += 1) {
+    const nextSegmentIndex = (segmentIndex + 1) % angularSegments;
+    indices.push(0, 1 + nextSegmentIndex, 1 + segmentIndex);
+  }
+
+  for (let ringIndex = 2; ringIndex <= radialSegments; ringIndex += 1) {
+    const previousStart = 1 + (ringIndex - 2) * angularSegments;
+    const currentStart = 1 + (ringIndex - 1) * angularSegments;
+
+    for (let segmentIndex = 0; segmentIndex < angularSegments; segmentIndex += 1) {
+      const nextSegmentIndex = (segmentIndex + 1) % angularSegments;
+      indices.push(
+        previousStart + segmentIndex,
+        previousStart + nextSegmentIndex,
+        currentStart + segmentIndex,
+        currentStart + segmentIndex,
+        previousStart + nextSegmentIndex,
+        currentStart + nextSegmentIndex
+      );
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+
+  return geometry;
+}
+
+function createEllipseSurfacePoints(
+  area: ImpactArea,
+  ringScale: number,
+  altitude: number,
+  angularSegments: number,
+  closeLoop: boolean
+) {
+  const frame = getSurfaceFrame(area.latitude, area.longitude);
+  const points: THREE.Vector3[] = [];
+  const pointCount = closeLoop ? angularSegments + 1 : angularSegments;
+
+  for (let segmentIndex = 0; segmentIndex < pointCount; segmentIndex += 1) {
+    const angle = (segmentIndex / angularSegments) * Math.PI * 2;
+    points.push(getEllipseSurfacePoint(area, frame, ringScale, angle, altitude));
+  }
+
+  return points;
+}
+
+function getEllipseSurfacePoint(
+  area: ImpactArea,
+  frame: SurfaceFrame,
+  ringScale: number,
+  angle: number,
+  altitude: number
+) {
+  const major = globeRadius * THREE.MathUtils.degToRad(area.majorDegrees) * ringScale;
+  const minor = globeRadius * THREE.MathUtils.degToRad(area.minorDegrees) * ringScale;
+  const rotation = THREE.MathUtils.degToRad(area.rotationDegrees);
+  const x = Math.cos(angle) * major;
+  const y = Math.sin(angle) * minor;
+  const rotatedX = x * Math.cos(rotation) - y * Math.sin(rotation);
+  const rotatedY = x * Math.sin(rotation) + y * Math.cos(rotation);
+
+  return getPointFromTangentDisplacement(frame, rotatedX, rotatedY, altitude);
+}
+
+function createWildfireEffects(event: CrisisEvent, area: ImpactArea) {
+  const group = new THREE.Group();
+  group.name = `wildfire-effects-${event.id}`;
+  const frame = getSurfaceFrame(area.latitude, area.longitude);
+  const rotation = THREE.MathUtils.degToRad(area.rotationDegrees);
+  const majorAxis = frame.east
+    .clone()
+    .multiplyScalar(Math.cos(rotation))
+    .add(frame.north.clone().multiplyScalar(Math.sin(rotation)))
+    .normalize();
+  const minorAxis = frame.north
+    .clone()
+    .multiplyScalar(Math.cos(rotation))
+    .sub(frame.east.clone().multiplyScalar(Math.sin(rotation)))
+    .normalize();
+  const random = createStableRandom(`${event.id}:wildfire-effects`);
+  const fireCount = Math.round(7 + area.severity * 4);
+
+  for (let index = 0; index < fireCount; index += 1) {
+    const angle = random() * Math.PI * 2;
+    const spread = Math.sqrt(random());
+    const majorSpread =
+      globeRadius * THREE.MathUtils.degToRad(area.majorDegrees) * 0.18 * spread;
+    const minorSpread =
+      globeRadius * THREE.MathUtils.degToRad(area.minorDegrees) * 0.38 * spread;
+    const offset = majorAxis
+      .clone()
+      .multiplyScalar(Math.cos(angle) * majorSpread)
+      .add(minorAxis.clone().multiplyScalar(Math.sin(angle) * minorSpread));
+    const position = getPointFromTangentVector(frame, offset, 0.018 + random() * 0.018);
+    const material = new THREE.MeshBasicMaterial({
+      color: random() > 0.42 ? 0xff7a18 : 0xfff1a8,
+      transparent: true,
+      opacity: 0.72,
+      depthWrite: false
+    });
+    const particle = new THREE.Mesh(new THREE.SphereGeometry(1, 8, 6), material);
+    const baseScale = 0.008 + random() * 0.009 + area.severity * 0.0012;
+    particle.position.copy(position);
+    particle.scale.setScalar(baseScale);
+    particle.userData = {
+      impactEffect: "fire",
+      baseScale,
+      baseOpacity: 0.7,
+      phase: random() * Math.PI * 2
+    };
+    particle.renderOrder = 10;
+    group.add(particle);
+  }
+
+  const smokePuffCount = Math.round(3 + area.severity);
+
+  for (let index = 0; index < smokePuffCount; index += 1) {
+    const drift =
+      globeRadius *
+      THREE.MathUtils.degToRad(area.majorDegrees) *
+      (0.06 + index * 0.055);
+    const lateral =
+      globeRadius *
+      THREE.MathUtils.degToRad(area.minorDegrees) *
+      (random() - 0.5) *
+      0.34;
+    const offset = majorAxis.clone().multiplyScalar(drift).add(minorAxis.clone().multiplyScalar(lateral));
+    const altitude = 0.04 + index * 0.025 + area.severity * 0.003;
+    const position = getPointFromTangentVector(frame, offset, altitude);
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x9ca3af,
+      transparent: true,
+      opacity: Math.max(0.08, 0.23 - index * 0.023),
+      depthWrite: false
+    });
+    const smoke = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), material);
+    const baseScale = 0.025 + index * 0.008 + area.severity * 0.0025;
+    smoke.position.copy(position);
+    smoke.scale.setScalar(baseScale);
+    smoke.userData = {
+      impactEffect: "smoke",
+      baseScale,
+      baseOpacity: material.opacity,
+      phase: random() * Math.PI * 2
+    };
+    smoke.renderOrder = 9;
+    group.add(smoke);
+  }
+
+  return group;
+}
+
+function animateImpactEffects(layer: THREE.Group, time: number) {
+  const seconds = time / 1000;
+
+  layer.traverse((object) => {
+    const effect = object.userData.impactEffect as "fire" | "smoke" | undefined;
+
+    if (!effect) {
+      return;
+    }
+
+    const mesh = object as THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+    const baseScale = Number(object.userData.baseScale) || 0.01;
+    const phase = Number(object.userData.phase) || 0;
+    const baseOpacity = Number(object.userData.baseOpacity) || mesh.material.opacity;
+
+    if (effect === "fire") {
+      const pulse = 0.78 + Math.sin(seconds * 8 + phase) * 0.22;
+      mesh.scale.setScalar(baseScale * pulse);
+      mesh.material.opacity = baseOpacity * (0.78 + Math.sin(seconds * 11 + phase) * 0.18);
+      return;
+    }
+
+    const pulse = 0.96 + Math.sin(seconds * 1.5 + phase) * 0.05;
+    mesh.scale.setScalar(baseScale * pulse);
+    mesh.material.opacity = baseOpacity * (0.86 + Math.sin(seconds * 1.1 + phase) * 0.1);
+  });
+}
+
+type SurfaceFrame = {
+  normal: THREE.Vector3;
+  east: THREE.Vector3;
+  north: THREE.Vector3;
+};
+
+function getSurfaceFrame(latitude: number, longitude: number): SurfaceFrame {
+  const normal = latLngToVector3(latitude, longitude, 1).normalize();
+  const worldUp = new THREE.Vector3(0, 1, 0);
+  let east = new THREE.Vector3().crossVectors(normal, worldUp);
+
+  if (east.lengthSq() < 0.000001) {
+    east = new THREE.Vector3(1, 0, 0).projectOnPlane(normal);
+  }
+
+  east.normalize();
+  const north = new THREE.Vector3().crossVectors(east, normal).normalize();
+
+  return { normal, east, north };
+}
+
+function getPointFromTangentDisplacement(
+  frame: SurfaceFrame,
+  eastOffset: number,
+  northOffset: number,
+  altitude: number
+) {
+  const tangentOffset = frame.east
+    .clone()
+    .multiplyScalar(eastOffset)
+    .add(frame.north.clone().multiplyScalar(northOffset));
+
+  return getPointFromTangentVector(frame, tangentOffset, altitude);
+}
+
+function getPointFromTangentVector(
+  frame: SurfaceFrame,
+  tangentOffset: THREE.Vector3,
+  altitude: number
+) {
+  const surfacePoint = frame.normal
+    .clone()
+    .multiplyScalar(globeRadius)
+    .add(tangentOffset)
+    .normalize();
+
+  return surfacePoint.multiplyScalar(globeRadius + altitude);
+}
+
+function getStableAngle(value: string) {
+  return (hashString(value) % 3600) / 10;
+}
+
+function createStableRandom(seed: string) {
+  let state = hashString(seed) || 1;
+
+  return () => {
+    state = Math.imul(1664525, state) + 1013904223;
+    return (state >>> 0) / 0x100000000;
+  };
+}
+
+function hashString(value: string) {
+  let hash = 2166136261;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return hash >>> 0;
+}
+
 function syncConflictOverlayLayer(
   layer: THREE.Group,
   overlay?: ConflictOverlayData | null
@@ -1110,6 +1579,28 @@ function syncConflictOverlayLayer(
 function createConflictOverlayLayer(overlay: ConflictOverlayData) {
   const group = new THREE.Group();
   group.name = "public-conflict-overlays";
+
+  for (const region of overlay.adminRegions ?? []) {
+    const fillColor =
+      region.status === "occupied-majority" ? 0xff1f1f : 0xff3b30;
+    const fillOpacity = region.status === "occupied-majority" ? 0.26 : 0.14;
+    const outlineOpacity = region.status === "occupied-majority" ? 0.62 : 0.42;
+
+    for (const ring of region.rings) {
+      const fill = createSurfacePolygon(ring, fillColor, fillOpacity, 0.004);
+
+      if (fill) {
+        fill.name = `conflict-admin-region-${region.id}`;
+        fill.renderOrder = 6;
+        group.add(fill);
+      }
+
+      const outline = createSurfaceLine(ring, fillColor, outlineOpacity, 0.007, 1);
+      outline.name = `conflict-admin-region-outline-${region.id}`;
+      outline.renderOrder = 7;
+      group.add(outline);
+    }
+  }
 
   for (const borderLine of overlay.borderLines) {
     for (const ring of borderLine.rings) {
@@ -1153,6 +1644,84 @@ function createConflictOverlayLayer(overlay: ConflictOverlayData) {
   }
 
   return group;
+}
+
+function createSurfacePolygon(
+  coordinates: SurfaceFocus[],
+  color: number,
+  opacity: number,
+  altitude: number
+) {
+  const ring = coordinates.filter(
+    (point) =>
+      Number.isFinite(point.latitude) &&
+      Number.isFinite(point.longitude) &&
+      Math.abs(point.latitude) <= 90 &&
+      Math.abs(point.longitude) <= 180
+  );
+
+  if (ring.length < 3) {
+    return null;
+  }
+
+  const center = getRingCenter(ring);
+  const positions: number[] = [];
+  const indices: number[] = [];
+  const centerPoint = latLngToVector3(
+    center.latitude,
+    center.longitude,
+    globeRadius + altitude
+  );
+
+  positions.push(centerPoint.x, centerPoint.y, centerPoint.z);
+
+  for (const point of ring) {
+    const vector = latLngToVector3(
+      point.latitude,
+      point.longitude,
+      globeRadius + altitude
+    );
+    positions.push(vector.x, vector.y, vector.z);
+  }
+
+  for (let index = 1; index < ring.length; index += 1) {
+    indices.push(0, index, index + 1);
+  }
+
+  indices.push(0, ring.length, 1);
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+
+  const material = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -8,
+    polygonOffsetUnits: -8
+  });
+
+  return new THREE.Mesh(geometry, material);
+}
+
+function getRingCenter(coordinates: SurfaceFocus[]) {
+  const totals = coordinates.reduce(
+    (accumulator, point) => ({
+      latitude: accumulator.latitude + point.latitude,
+      longitude: accumulator.longitude + point.longitude
+    }),
+    { latitude: 0, longitude: 0 }
+  );
+
+  return {
+    latitude: totals.latitude / coordinates.length,
+    longitude: totals.longitude / coordinates.length
+  };
 }
 
 function normalizeLongitude(longitude: number) {

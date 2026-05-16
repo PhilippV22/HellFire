@@ -15,6 +15,7 @@
     "db:migrate": "tsx scripts/db-migrate.ts",
     "db:seed": "tsx scripts/db-seed.ts",
     "db:clear-mock-events": "tsx scripts/db-clear-mock-events.ts",
+    "events:audit": "tsx scripts/events-audit.ts",
     "worker": "tsx scripts/worker.ts"
   },
   "dependencies": {

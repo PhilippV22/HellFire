@@ -64,31 +64,36 @@ export const categoryMeta: Record<
     label: "Earthquake",
     icon: "◈",
     color: "bg-red-300 text-slate-950",
-    markerColor: "#f87171"
+    markerColor: "#f87171",
+    assetPath: hellfireBrandAssets.categories.earthquake
   },
   disaster: {
     label: "Disaster",
     icon: "◆",
     color: "bg-teal-300 text-slate-950",
-    markerColor: "#5eead4"
+    markerColor: "#5eead4",
+    assetPath: hellfireBrandAssets.categories.disaster
   },
   protest: {
     label: "Protest",
     icon: "●",
     color: "bg-fuchsia-300 text-slate-950",
-    markerColor: "#f0abfc"
+    markerColor: "#f0abfc",
+    assetPath: hellfireBrandAssets.categories.protest
   },
   conflict: {
     label: "Conflict",
     icon: "◇",
     color: "bg-red-200 text-slate-950",
-    markerColor: "#fecaca"
+    markerColor: "#fecaca",
+    assetPath: hellfireBrandAssets.categories.conflict
   },
   health: {
     label: "Health",
     icon: "✚",
     color: "bg-lime-300 text-slate-950",
-    markerColor: "#bef264"
+    markerColor: "#bef264",
+    assetPath: hellfireBrandAssets.categories.health
   },
   incident: {
     label: "Incident",

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import maplibregl, { type Map, type Marker } from "maplibre-gl";
-import { categoryMeta } from "@/lib/eventMeta";
+import { getEventVisual } from "@/lib/eventVisuals";
 import type { CrisisEvent, InfrastructureAsset } from "@/types/events";
 
 type MapViewProps = {
@@ -99,11 +99,17 @@ export function MapView({
     markersRef.current = [];
 
     events.forEach((event) => {
-      const meta = categoryMeta[event.category];
+      const meta = getEventVisual(event);
       const element = document.createElement("button");
       element.type = "button";
       element.className = "event-marker";
       element.dataset.active = String(event.id === selectedEvent?.id);
+      element.dataset.quality =
+        event.qualityFlags?.includes("approximate-location") ||
+        event.locationPrecision === "country" ||
+        event.locationPrecision === "approximate"
+          ? "approximate"
+          : "normal";
       element.style.borderColor = meta.markerColor;
       element.setAttribute("aria-label", event.title);
       element.style.setProperty("--marker-color", meta.markerColor);

@@ -38,6 +38,27 @@ type StoredReportResult = {
 
 type EventRow = Record<string, unknown>;
 
+type EvidenceReport = {
+  sourceName: string;
+  sourceCountry: string;
+  sourceLanguage: string;
+  title: string;
+  description: string;
+  confidence: number;
+  geocodeConfidence: number;
+  hasSpecificLocation: boolean;
+  denialLanguage: boolean;
+  score: number;
+};
+
+type EvidenceAssessment = {
+  independentCountryCount: number;
+  contradictionDetected: boolean;
+  confidenceBonus: number;
+  confidencePenalty: number;
+  noteBody?: string;
+};
+
 export async function seedSources() {
   for (const source of osintSources) {
     await query(
@@ -641,11 +662,17 @@ async function updateCluster(
   );
   const rawReportCount = Number(countsResult.rows[0]?.raw_report_count ?? 1);
   const sourceCount = Number(countsResult.rows[0]?.source_count ?? 1);
-  const confidence = Math.min(
-    0.98,
-    Math.max(Number(cluster.confidence ?? 0), report.confidence) +
-      Math.max(0, sourceCount - 1) * 0.08 +
-      Math.min(3, Math.max(0, rawReportCount - 1)) * 0.02
+  const evidence = await assessEventEvidence(client, eventId);
+  const confidence = Math.max(
+    0.05,
+    Math.min(
+      0.98,
+      Math.max(Number(cluster.confidence ?? 0), report.confidence) +
+        Math.max(0, sourceCount - 1) * 0.065 +
+        Math.min(3, Math.max(0, rawReportCount - 1)) * 0.015 +
+        evidence.confidenceBonus -
+        evidence.confidencePenalty
+    )
   );
   const nextSeverity = Math.max(Number(cluster.severity ?? 1), report.severity);
   const title = report.severity > Number(cluster.severity ?? 1) ? report.title : String(cluster.title);
@@ -696,6 +723,7 @@ async function updateCluster(
   );
 
   await addImpactNote(client, eventId, civilImpact);
+  await addEvidenceNote(client, eventId, evidence.noteBody);
 
   return { eventId, created: false, skipped: false };
 }
@@ -741,6 +769,206 @@ async function addImpactNote(client: PoolClient, eventId: string, body: string) 
   );
 }
 
+async function addEvidenceNote(
+  client: PoolClient,
+  eventId: string,
+  body?: string
+) {
+  if (!body) {
+    return;
+  }
+
+  await client.query(
+    `INSERT INTO analysis_notes (id, event_id, note_type, body, created_by)
+     VALUES ($1, $2, 'system', $3, 'evidence-weighting')
+     ON CONFLICT (id) DO NOTHING`,
+    [`note-${hashString(`${eventId}:evidence:${body}`)}`, eventId, body]
+  );
+}
+
+async function assessEventEvidence(
+  client: PoolClient,
+  eventId: string
+): Promise<EvidenceAssessment> {
+  const result = await client.query<EventRow>(
+    `SELECT
+       source_name,
+       title,
+       description,
+       country,
+       region,
+       place_name,
+       event_time,
+       confidence,
+       geocode_confidence,
+       normalized_payload ->> 'sourceCountry' AS source_country,
+       normalized_payload ->> 'sourceLanguage' AS source_language
+     FROM raw_reports
+     WHERE event_id = $1
+     ORDER BY detected_time DESC
+     LIMIT 40`,
+    [eventId]
+  );
+  const reports = result.rows.map(mapEvidenceReport);
+
+  if (reports.length < 2) {
+    return {
+      independentCountryCount: 0,
+      contradictionDetected: false,
+      confidenceBonus: 0,
+      confidencePenalty: 0
+    };
+  }
+
+  const sourceCountries = new Set(
+    reports.map((report) => report.sourceCountry).filter(Boolean)
+  );
+  const denialCount = reports.filter((report) => report.denialLanguage).length;
+  const contradictionDetected = denialCount > 0 && denialCount < reports.length;
+  const bestSupported = reports.reduce((best, report) =>
+    report.score > best.score ? report : best
+  );
+  const confidenceBonus = Math.min(
+    0.12,
+    Math.max(0, sourceCountries.size - 1) * 0.025 +
+      (reports.some((report) => report.hasSpecificLocation) ? 0.02 : 0)
+  );
+  const confidencePenalty = contradictionDetected ? 0.1 : 0;
+
+  return {
+    independentCountryCount: sourceCountries.size,
+    contradictionDetected,
+    confidenceBonus,
+    confidencePenalty,
+    noteBody: createEvidenceNote({
+      reports,
+      sourceCountries,
+      contradictionDetected,
+      bestSupported
+    })
+  };
+}
+
+function mapEvidenceReport(row: EventRow): EvidenceReport {
+  const title = rowString(row.title);
+  const description = rowString(row.description);
+  const sourceCountry = rowString(row.source_country);
+  const placeName = rowString(row.place_name);
+  const country = rowString(row.country);
+  const region = rowString(row.region);
+  const confidence = rowNumber(row.confidence);
+  const geocodeConfidence = rowNumber(row.geocode_confidence);
+  const hasSpecificLocation = Boolean(placeName && placeName !== country && placeName !== region);
+  const denialLanguage = hasDenialLanguage(`${title} ${description}`);
+  const score =
+    confidence +
+    geocodeConfidence * 0.2 +
+    (hasSpecificLocation ? 0.08 : 0) +
+    (sourceCountry ? 0.03 : 0);
+
+  return {
+    sourceName: rowString(row.source_name) || "Unknown source",
+    sourceCountry,
+    sourceLanguage: rowString(row.source_language),
+    title,
+    description,
+    confidence,
+    geocodeConfidence,
+    hasSpecificLocation,
+    denialLanguage,
+    score
+  };
+}
+
+function createEvidenceNote({
+  reports,
+  sourceCountries,
+  contradictionDetected,
+  bestSupported
+}: {
+  reports: EvidenceReport[];
+  sourceCountries: Set<string>;
+  contradictionDetected: boolean;
+  bestSupported: EvidenceReport;
+}) {
+  const sourceNames = new Set(reports.map((report) => report.sourceName));
+  const countrySummary =
+    sourceCountries.size > 0
+      ? ` aus ${sourceCountries.size} Herkunftsraeumen`
+      : "";
+  const languageSummary = Array.from(
+    new Set(reports.map((report) => report.sourceLanguage).filter(Boolean))
+  )
+    .slice(0, 4)
+    .join(", ");
+  const parts = [
+    `Quellenabgleich: ${reports.length} Rohberichte von ${sourceNames.size} Quellen${countrySummary}.`
+  ];
+
+  if (languageSummary) {
+    parts.push(`Sprachen: ${languageSummary}.`);
+  }
+
+  if (contradictionDetected) {
+    parts.push(
+      "Widerspruch oder Bestreitung erkannt; die Confidence wurde gebremst, bis mehr unabhaengige Uebereinstimmung vorliegt."
+    );
+  } else {
+    parts.push(
+      "Keine direkte Bestreitung im Cluster erkannt; mehrere unabhaengige Quellen erhoehen die Confidence."
+    );
+  }
+
+  parts.push(
+    `Aktuell am staerksten gewichtet: ${bestSupported.sourceName} - "${truncateText(
+      bestSupported.title,
+      130
+    )}" wegen Orts-/Zeitangaben, Geocode-Confidence und Bericht-Confidence.`
+  );
+
+  return parts.join(" ");
+}
+
+function hasDenialLanguage(text: string) {
+  return /(denies|denied|rejects|refutes|false|fake|not confirmed|unconfirmed|no evidence|опроверг|отрица|не подтверж|фейк|否认|駁斥|驳斥|不实|未证实|沒有證據|没有证据)/i.test(
+    text
+  );
+}
+
+function truncateText(value: string, maxLength: number) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength - 3)}...`;
+}
+
+function rowString(value: unknown) {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+
+  if (typeof value === "number") {
+    return value.toString();
+  }
+
+  return "";
+}
+
+function rowNumber(value: unknown) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  if (typeof value === "string") {
+    const number = Number(value);
+
+    return Number.isFinite(number) ? number : 0;
+  }
+
+  return 0;
+}
+
 async function getSourcesForEvents(eventIds: string[]) {
   const sourceMap = new Map<string, ReturnType<typeof mapSourceRow>[]>();
 
@@ -749,10 +977,19 @@ async function getSourcesForEvents(eventIds: string[]) {
   }
 
   const result = await query<EventRow>(
-    `SELECT event_id, raw_report_id, source_id, source_name, url, title
+    `SELECT
+       event_sources.event_id,
+       event_sources.raw_report_id,
+       event_sources.source_id,
+       event_sources.source_name,
+       event_sources.url,
+       event_sources.title,
+       raw_reports.normalized_payload ->> 'sourceCountry' AS source_country,
+       raw_reports.normalized_payload ->> 'sourceLanguage' AS source_language
      FROM event_sources
-     WHERE event_id = ANY($1::TEXT[])
-     ORDER BY created_at DESC`,
+     LEFT JOIN raw_reports ON raw_reports.id = event_sources.raw_report_id
+     WHERE event_sources.event_id = ANY($1::TEXT[])
+     ORDER BY event_sources.created_at DESC`,
     [eventIds]
   );
 

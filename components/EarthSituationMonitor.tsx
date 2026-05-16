@@ -611,6 +611,25 @@ function EventIntel({
         />
       </div>
 
+      <section className="mt-4 rounded-md border border-white/10 bg-white/5 p-3">
+        <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+          Datenqualitaet
+        </h3>
+        <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+          <span className="rounded bg-slate-900/70 px-2 py-1 text-slate-300">
+            Ort: {qualityLabel(event.locationPrecision)}
+          </span>
+          <span className="rounded bg-slate-900/70 px-2 py-1 text-slate-300">
+            Check: {verificationLabel(event.verificationStatus)}
+          </span>
+        </div>
+        {event.qualityFlags?.length ? (
+          <p className="mt-2 text-xs leading-5 text-amber-100">
+            {event.qualityFlags.map(qualityFlagLabel).join(" · ")}
+          </p>
+        ) : null}
+      </section>
+
       <section className="mt-4">
         <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
           Zeit
@@ -641,9 +660,9 @@ function EventIntel({
           Quellen
         </h3>
         <div className="mt-2 space-y-2">
-          {event.sources.slice(0, compact ? 2 : 5).map((source) => (
+          {event.sources.slice(0, compact ? 2 : 5).map((source, index) => (
             <div
-              key={`${source.name}:${source.reportId ?? source.url ?? source.note}`}
+              key={`${source.name}:${source.reportId ?? source.url ?? source.note}:${index}`}
               className="rounded-md border border-white/10 bg-white/5 p-3"
             >
               <div className="flex items-start justify-between gap-3">
@@ -653,6 +672,11 @@ function EventIntel({
                 </span>
               </div>
               <p className="mt-1 text-xs leading-5 text-slate-400">{source.note}</p>
+              {source.sourceCountry || source.sourceLanguage ? (
+                <p className="mt-2 text-[11px] uppercase tracking-[0.12em] text-slate-500">
+                  {[source.sourceCountry, source.sourceLanguage].filter(Boolean).join(" · ")}
+                </p>
+              ) : null}
             </div>
           ))}
         </div>
@@ -700,9 +724,9 @@ function EventIntel({
             Rohberichte
           </h3>
           <div className="mt-2 space-y-2">
-            {rawReports.slice(0, 4).map((report) => (
+            {rawReports.slice(0, 4).map((report, index) => (
               <div
-                key={report.id}
+                key={`${report.id}:${index}`}
                 className="rounded-md border border-white/10 bg-white/5 p-3"
               >
                 <p className="text-sm font-medium text-white">{report.title}</p>
@@ -738,6 +762,46 @@ function EventIntel({
 
 function isEventDetail(event: CrisisEvent | EventDetail): event is EventDetail {
   return "rawReports" in event;
+}
+
+function qualityLabel(value?: CrisisEvent["locationPrecision"]) {
+  const labels: Record<NonNullable<CrisisEvent["locationPrecision"]>, string> = {
+    exact: "genau",
+    regional: "regional",
+    country: "Land",
+    approximate: "ungefaehr",
+    unknown: "unklar"
+  };
+
+  return value ? labels[value] : "unklar";
+}
+
+function verificationLabel(value?: CrisisEvent["verificationStatus"]) {
+  const labels: Record<NonNullable<CrisisEvent["verificationStatus"]>, string> = {
+    verified: "mehrfach bestaetigt",
+    "multi-source": "mehrere Quellen",
+    "single-source": "Einzelquelle",
+    conflicted: "widerspruechlich",
+    "low-confidence": "niedrige Sicherheit"
+  };
+
+  return value ? labels[value] : "offen";
+}
+
+function qualityFlagLabel(value: NonNullable<CrisisEvent["qualityFlags"]>[number]) {
+  const labels: Record<NonNullable<CrisisEvent["qualityFlags"]>[number], string> = {
+    "low-geocode": "niedrige Ortsconfidence",
+    "approximate-location": "ungefaehrer Ort",
+    "country-centroid": "Landesmittelpunkt",
+    "headline-place-fragment": "Ortsname fraglich",
+    "single-source": "nur eine Quelle",
+    "missing-source-url": "Quellen-URL fehlt",
+    stale: "moeglicherweise veraltet",
+    "possible-non-event": "moeglicherweise kein akutes Ereignis",
+    "conflicting-reports": "Quellen widersprechen sich"
+  };
+
+  return labels[value];
 }
 
 function CategoryVisual({

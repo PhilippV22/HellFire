@@ -19,6 +19,31 @@ export type EventCategory = (typeof eventCategories)[number];
 
 export type EventStatus = "unreviewed" | "confirmed" | "rejected" | "archived";
 
+export type EventQualityFlag =
+  | "low-geocode"
+  | "approximate-location"
+  | "country-centroid"
+  | "headline-place-fragment"
+  | "single-source"
+  | "missing-source-url"
+  | "stale"
+  | "possible-non-event"
+  | "conflicting-reports";
+
+export type LocationPrecision =
+  | "exact"
+  | "regional"
+  | "country"
+  | "approximate"
+  | "unknown";
+
+export type VerificationStatus =
+  | "verified"
+  | "multi-source"
+  | "single-source"
+  | "conflicted"
+  | "low-confidence";
+
 export type SourceType =
   | "public-agency"
   | "local-report"
@@ -42,6 +67,8 @@ export type CrisisSource = {
   url?: string;
   note: string;
   reportId?: string;
+  sourceCountry?: string;
+  sourceLanguage?: string;
 };
 
 export type CrisisEvent = {
@@ -65,6 +92,9 @@ export type CrisisEvent = {
   sourceCount?: number;
   rawReportCount?: number;
   geocodeConfidence?: number;
+  qualityFlags?: EventQualityFlag[];
+  locationPrecision?: LocationPrecision;
+  verificationStatus?: VerificationStatus;
   archivedAt?: string;
   updatedAt?: string;
 };

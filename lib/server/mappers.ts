@@ -1,3 +1,4 @@
+import { enrichEventQuality } from "@/lib/eventQuality";
 import type {
   AnalysisNote,
   CrisisEvent,
@@ -13,7 +14,7 @@ import type {
 type DbRow = Record<string, unknown>;
 
 export function mapEventRow(row: DbRow, sources: CrisisSource[] = []): CrisisEvent {
-  return {
+  return enrichEventQuality({
     id: stringValue(row.id),
     title: stringValue(row.title),
     description: stringValue(row.description),
@@ -36,7 +37,7 @@ export function mapEventRow(row: DbRow, sources: CrisisSource[] = []): CrisisEve
     geocodeConfidence: numberValue(row.geocode_confidence),
     archivedAt: optionalDateIso(row.archived_at),
     updatedAt: dateIso(row.updated_at)
-  };
+  });
 }
 
 export function mapSourceRow(row: DbRow): CrisisSource {
@@ -45,7 +46,9 @@ export function mapSourceRow(row: DbRow): CrisisSource {
     type: sourceTypeFromId(stringValue(row.source_id)),
     url: optionalString(row.url),
     note: stringValue(row.title) || "OSINT report",
-    reportId: stringValue(row.raw_report_id)
+    reportId: stringValue(row.raw_report_id),
+    sourceCountry: optionalString(row.source_country),
+    sourceLanguage: optionalString(row.source_language)
   };
 }
 

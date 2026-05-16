@@ -155,12 +155,13 @@ async function loadGdeltDocPayload() {
   const url = new URL("https://api.gdeltproject.org/api/v2/doc/doc");
   url.searchParams.set(
     "query",
-    "(earthquake OR flood OR wildfire OR hurricane OR protest OR hospital OR power outage OR water shortage OR rail disruption OR communications outage OR humanitarian crisis)"
+    "((earthquake OR flood OR wildfire OR hurricane OR protest OR hospital OR power outage OR water shortage OR rail disruption OR communications outage OR humanitarian crisis) OR ((Ukraine OR Ukrainian OR Russia OR Russian OR Donetsk OR Luhansk OR Kherson OR Zaporizhzhia OR Kharkiv OR Pokrovsk) (shelling OR missile OR drone OR strike OR attack OR evacuation OR occupation OR humanitarian OR frontline OR front line)))"
   );
   url.searchParams.set("mode", "artlist");
   url.searchParams.set("format", "json");
-  url.searchParams.set("maxrecords", "75");
+  url.searchParams.set("maxrecords", "150");
   url.searchParams.set("sort", "hybridrel");
+  url.searchParams.set("timespan", "30d");
 
   return { payload: await fetchJson(url) };
 }
@@ -203,7 +204,10 @@ async function loadRssPayload() {
       return parseRssItems(xml, {
         feedId: feed.id,
         feedName: feed.name,
-        categoryHint: feed.defaultCategoryHint
+        categoryHint: feed.defaultCategoryHint,
+        feedUrl: feed.url,
+        sourceCountry: feed.sourceCountry,
+        sourceLanguage: feed.sourceLanguage
       });
     })
   );
@@ -233,7 +237,8 @@ async function loadConflictNewsPayload() {
         feedUrl: feed.url,
         sourceCountry: feed.sourceCountry,
         sourceLanguage: feed.sourceLanguage,
-        categoryHint: "war conflict missile strike ceasefire invasion refugee humanitarian"
+        categoryHint:
+          "ukraine russia war conflict shelling missile strike drone ceasefire invasion occupation refugee humanitarian"
       }).filter((item) => {
         const text = [
           item.title,
