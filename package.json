@@ -16,6 +16,8 @@
     "db:seed": "tsx scripts/db-seed.ts",
     "db:clear-mock-events": "tsx scripts/db-clear-mock-events.ts",
     "events:audit": "tsx scripts/events-audit.ts",
+    "sources:coverage": "tsx scripts/sources-coverage.ts",
+    "sources:validate": "tsx scripts/sources-validate.ts",
     "worker": "tsx scripts/worker.ts"
   },
   "dependencies": {

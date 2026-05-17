@@ -29,7 +29,15 @@ export function parseRssItems(
   const parsed = parser.parse(xml) as Record<string, unknown>;
   const rss = recordValue(parsed.rss);
   const channel = recordValue(rss?.channel);
-  const items = toArray(channel?.item);
+  const rdf = recordValue(parsed["rdf:RDF"]);
+  const atom = recordValue(parsed.feed);
+  const items = channel
+    ? toArray(channel.item)
+    : rdf
+      ? toArray(rdf.item)
+      : atom
+        ? toArray(atom.entry).map(normalizeAtomEntry)
+        : [];
 
   return items.filter(isRecord).map((item) => ({
     ...item,
@@ -42,6 +50,35 @@ export function parseRssItems(
   }));
 }
 
+function normalizeAtomEntry(entry: unknown) {
+  if (!isRecord(entry)) {
+    return entry;
+  }
+
+  const link = toArray(entry.link)
+    .map((candidate) => {
+      if (typeof candidate === "string") {
+        return candidate;
+      }
+
+      const record = recordValue(candidate);
+
+      return (
+        stringValue(record?.["@_href"]) ||
+        stringValue(record?.href) ||
+        stringValue(record?.["#text"])
+      );
+    })
+    .find(Boolean);
+
+  return {
+    ...entry,
+    description: entry.summary || entry.content || entry.description,
+    link,
+    pubDate: entry.published || entry.updated || entry.pubDate
+  };
+}
+
 function toArray(value: unknown) {
   if (Array.isArray(value)) {
     return value;
@@ -52,6 +89,18 @@ function toArray(value: unknown) {
 
 function recordValue(value: unknown) {
   return isRecord(value) ? value : undefined;
+}
+
+function stringValue(value: unknown) {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+
+  if (typeof value === "number") {
+    return value.toString();
+  }
+
+  return "";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

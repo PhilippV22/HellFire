@@ -1,8 +1,14 @@
 import type { PoolClient } from "pg";
 import { localInfrastructure } from "@/data/localInfrastructure";
 import { osintSources } from "@/data/osintSources";
+import {
+  globalRssSources,
+  sourceToRawSourceId,
+  summarizeSourceCoverage
+} from "@/data/sourceCatalog";
 import { getEventRetentionHours } from "@/lib/eventLifecycle";
 import { createCivilImpactAnalysis } from "@/lib/osint/impact";
+import type { FeedLoadStat } from "@/lib/osint/ingest";
 import type { NormalizedReport } from "@/lib/osint/normalize";
 import { query, withClient } from "@/lib/server/db";
 import {
@@ -80,6 +86,107 @@ export async function seedSources() {
       ]
     );
   }
+
+  for (const source of globalRssSources) {
+    await query(
+      `INSERT INTO raw_sources
+        (id, name, source_type, base_url, cadence_minutes, enabled,
+         source_country, source_language, tags, updated_at)
+       VALUES ($1, $2, 'rss', $3, $4, $5, $6, $7, $8::JSONB, NOW())
+       ON CONFLICT (id) DO UPDATE SET
+        name = EXCLUDED.name,
+        source_type = EXCLUDED.source_type,
+        base_url = EXCLUDED.base_url,
+        cadence_minutes = EXCLUDED.cadence_minutes,
+        enabled = EXCLUDED.enabled,
+        source_country = EXCLUDED.source_country,
+        source_language = EXCLUDED.source_language,
+        tags = EXCLUDED.tags,
+        updated_at = NOW()`,
+      [
+        sourceToRawSourceId(source),
+        source.name,
+        source.url,
+        source.cadenceMinutes,
+        source.enabled,
+        source.country,
+        source.language,
+        JSON.stringify(source.tags)
+      ]
+    );
+  }
+}
+
+export async function recordRssFeedHealth(stats: FeedLoadStat[]) {
+  if (stats.length === 0) {
+    return;
+  }
+
+  for (const stat of stats) {
+    if (stat.ok) {
+      await query(
+        `UPDATE raw_sources
+         SET last_success_at = NOW(),
+             last_error = NULL,
+             failure_count = 0,
+             disabled_reason = NULL,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [stat.feedId]
+      );
+      continue;
+    }
+
+    await query(
+      `UPDATE raw_sources
+       SET last_error_at = NOW(),
+           last_error = $2,
+           failure_count = failure_count + 1,
+           disabled_reason = CASE
+             WHEN failure_count + 1 >= 10 THEN 'temporary-backoff'
+             ELSE disabled_reason
+           END,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [stat.feedId, stat.error ?? "Feed unavailable"]
+    );
+  }
+}
+
+export async function listSourceHealth() {
+  const coverage = summarizeSourceCoverage();
+  const result = await query<Record<string, unknown>>(
+    `SELECT id, name, source_type, base_url, enabled, cadence_minutes,
+            source_country, source_language, tags, last_ingested_at,
+            last_success_at, last_error_at, last_error, failure_count,
+            disabled_reason, updated_at
+     FROM raw_sources
+     WHERE id LIKE 'rss:%'
+     ORDER BY failure_count DESC, last_error_at DESC NULLS LAST, name ASC
+     LIMIT 1000`
+  );
+
+  return {
+    coverage,
+    sources: result.rows.map((row) => ({
+      id: String(row.id),
+      name: String(row.name),
+      sourceType: String(row.source_type),
+      url: optionalString(row.base_url),
+      enabled: Boolean(row.enabled),
+      cadenceMinutes: optionalNumber(row.cadence_minutes),
+      country: optionalString(row.source_country),
+      language: optionalString(row.source_language),
+      tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
+      lastIngestedAt: optionalString(row.last_ingested_at),
+      lastSuccessAt: optionalString(row.last_success_at),
+      lastErrorAt: optionalString(row.last_error_at),
+      lastError: optionalString(row.last_error),
+      failureCount: optionalNumber(row.failure_count) ?? 0,
+      disabledReason: optionalString(row.disabled_reason),
+      updatedAt: optionalString(row.updated_at)
+    }))
+  };
 }
 
 export async function seedInfrastructure() {
@@ -1051,6 +1158,32 @@ function inferCountry(name: string) {
   const first = name.split(" ")[0];
 
   return lookup[first] ?? null;
+}
+
+function optionalString(value: unknown) {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return value ? String(value) : undefined;
+}
+
+function optionalNumber(value: unknown) {
+  if (typeof value === "number") {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  return undefined;
 }
 
 const lifecycleCategories: EventCategory[] = [

@@ -17,11 +17,38 @@ type ApiResponse<T> = {
   data?: T;
   error?: string;
   detail?: string;
+  warning?: string;
+};
+
+type SourceHealthResponse = {
+  coverage: {
+    enabledSources: number;
+    enabledCountries: number;
+    germanySources: number;
+    conflictSources: number;
+  };
+  sources: SourceHealthItem[];
+};
+
+type SourceHealthItem = {
+  id: string;
+  name: string;
+  url?: string;
+  country?: string;
+  language?: string;
+  tags?: string[];
+  enabled: boolean;
+  failureCount: number;
+  lastSuccessAt?: string;
+  lastErrorAt?: string;
+  lastError?: string;
+  disabledReason?: string;
 };
 
 export function AdminDashboard() {
   const [events, setEvents] = useState<CrisisEvent[]>([]);
   const [rawReports, setRawReports] = useState<RawReport[]>([]);
+  const [sourceHealth, setSourceHealth] = useState<SourceHealthResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
 
@@ -33,12 +60,24 @@ export function AdminDashboard() {
         fetch("/api/events?includeRejected=1", { cache: "no-store" }),
         fetch("/api/admin/raw-reports", { cache: "no-store" })
       ]);
+      const sourceResponse = await fetch("/api/admin/source-health", {
+        cache: "no-store"
+      });
       const eventsPayload = (await eventsResponse.json()) as ApiResponse<CrisisEvent[]>;
       const rawPayload = (await rawResponse.json()) as ApiResponse<RawReport[]>;
+      const sourcePayload =
+        (await sourceResponse.json()) as ApiResponse<SourceHealthResponse>;
 
       setEvents(eventsPayload.data ?? []);
       setRawReports(rawPayload.data ?? []);
-      setMessage(rawPayload.error || eventsPayload.error || "");
+      setSourceHealth(sourcePayload.data ?? null);
+      setMessage(
+        rawPayload.error ||
+          eventsPayload.error ||
+          sourcePayload.error ||
+          sourcePayload.warning ||
+          ""
+      );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Admin API nicht erreichbar");
     } finally {
@@ -125,13 +164,14 @@ export function AdminDashboard() {
         <aside className="min-h-[calc(100dvh-40px)] rounded-md border border-white/10 bg-slate-950/80 shadow-2xl">
           <div className="flex items-center justify-between border-b border-white/10 px-4 py-4">
             <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">
-              Raw Reports
+              Quellen & Raw Reports
             </h2>
             <span className="rounded bg-white/5 px-2 py-1 text-xs text-slate-300">
               {rawReports.length}
             </span>
           </div>
           <div className="max-h-[calc(100dvh-104px)] space-y-3 overflow-y-auto p-4">
+            {sourceHealth ? <SourceHealthPanel health={sourceHealth} /> : null}
             {rawReports.map((report) => (
               <RawReportCard key={report.id} report={report} />
             ))}
@@ -139,6 +179,52 @@ export function AdminDashboard() {
         </aside>
       </div>
     </main>
+  );
+}
+
+function SourceHealthPanel({ health }: { health: SourceHealthResponse }) {
+  const failingSources = health.sources
+    .filter((source) => source.failureCount > 0 || source.lastError)
+    .slice(0, 8);
+
+  return (
+    <section className="rounded-md border border-cyan-300/20 bg-cyan-300/10 p-3">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100">
+        Source Health
+      </p>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+        <MiniMetric label="Quellen" value={`${health.coverage.enabledSources}`} />
+        <MiniMetric label="Laender" value={`${health.coverage.enabledCountries}`} />
+        <MiniMetric label="Deutschland" value={`${health.coverage.germanySources}`} />
+        <MiniMetric label="Konflikt" value={`${health.coverage.conflictSources}`} />
+      </div>
+      {failingSources.length > 0 ? (
+        <div className="mt-3 space-y-2">
+          {failingSources.map((source) => (
+            <div
+              key={source.id}
+              className="rounded-md border border-white/10 bg-slate-950/50 px-2 py-1.5 text-xs"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate font-medium text-white">{source.name}</span>
+                <span className="shrink-0 text-amber-200">
+                  {source.failureCount} fail
+                </span>
+              </div>
+              <p className="mt-1 truncate text-slate-400">
+                {[source.country, source.language, source.lastError]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-3 text-xs text-cyan-50/80">
+          Keine lokalen Feed-Fehler gespeichert.
+        </p>
+      )}
+    </section>
   );
 }
 

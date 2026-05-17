@@ -8,9 +8,17 @@ CREATE TABLE IF NOT EXISTS raw_sources (
     source_type IN ('gdelt', 'gdelt-doc', 'reliefweb', 'usgs', 'gdacs', 'eonet', 'emsc', 'conflict-news', 'rss', 'mock')
   ),
   base_url TEXT,
+  source_country TEXT,
+  source_language TEXT,
+  tags JSONB NOT NULL DEFAULT '[]'::JSONB,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   cadence_minutes INTEGER,
   last_ingested_at TIMESTAMPTZ,
+  last_success_at TIMESTAMPTZ,
+  last_error_at TIMESTAMPTZ,
+  last_error TEXT,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  disabled_reason TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -142,6 +150,8 @@ CREATE INDEX IF NOT EXISTS raw_reports_source_idx ON raw_reports (source_id);
 CREATE INDEX IF NOT EXISTS raw_reports_category_idx ON raw_reports (category);
 CREATE INDEX IF NOT EXISTS raw_reports_event_idx ON raw_reports (event_id);
 CREATE INDEX IF NOT EXISTS raw_reports_detected_idx ON raw_reports (detected_time DESC);
+CREATE INDEX IF NOT EXISTS raw_sources_country_idx ON raw_sources (source_country);
+CREATE INDEX IF NOT EXISTS raw_sources_failure_idx ON raw_sources (failure_count DESC, last_error_at DESC);
 
 CREATE INDEX IF NOT EXISTS event_sources_event_idx ON event_sources (event_id);
 CREATE INDEX IF NOT EXISTS event_sources_source_idx ON event_sources (source_id);

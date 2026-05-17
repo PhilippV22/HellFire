@@ -3,9 +3,15 @@ import {
   conflictNewsFeeds
 } from "@/data/conflictNewsFeeds";
 import { publicCrisisRssFeeds } from "@/data/rssFeeds";
+import { sourceToRawSourceId } from "@/data/sourceCatalog";
 import { normalizeSourcePayload, type SourceId } from "@/lib/osint/normalize";
 import { parseRssItems } from "@/lib/osint/rss";
-import { seedInfrastructure, seedSources, storeNormalizedReports } from "@/lib/server/osintRepository";
+import {
+  recordRssFeedHealth,
+  seedInfrastructure,
+  seedSources,
+  storeNormalizedReports
+} from "@/lib/server/osintRepository";
 
 export type IngestResult = {
   source: SourceId;
@@ -22,6 +28,14 @@ export type IngestResult = {
 type LoadedPayload = {
   payload: unknown;
   warning?: string;
+  feedStats?: FeedLoadStat[];
+};
+
+export type FeedLoadStat = {
+  feedId: string;
+  ok: boolean;
+  itemCount: number;
+  error?: string;
 };
 
 export const productionSourceIds = [
@@ -39,7 +53,8 @@ export const productionSourceIds = [
 export async function ingestSource(source: SourceId): Promise<IngestResult> {
   await seedSources();
   await seedInfrastructure();
-  const { reports, warning } = await fetchNormalizedReports(source);
+  const { reports, warning, feedStats } = await fetchNormalizedReports(source);
+  await recordRssFeedHealth(feedStats ?? []);
   const stats = await storeNormalizedReports(reports);
 
   return {
@@ -62,11 +77,12 @@ export async function ingestAllSources() {
 }
 
 export async function fetchNormalizedReports(source: SourceId) {
-  const { payload, warning } = await loadPayload(source);
+  const { payload, warning, feedStats } = await loadPayload(source);
 
   return {
     reports: normalizeSourcePayload(source, payload),
-    warning
+    warning,
+    feedStats
   };
 }
 
@@ -197,28 +213,21 @@ async function loadGdacsPayload() {
 }
 
 async function loadRssPayload() {
-  const settled = await Promise.allSettled(
-    publicCrisisRssFeeds.map(async (feed) => {
-      const xml = await fetchText(new URL(feed.url));
-
-      return parseRssItems(xml, {
-        feedId: feed.id,
-        feedName: feed.name,
-        categoryHint: feed.defaultCategoryHint,
-        feedUrl: feed.url,
-        sourceCountry: feed.sourceCountry,
-        sourceLanguage: feed.sourceLanguage
-      });
-    })
+  const { items, failures, stats } = await loadFeedBatch(
+    publicCrisisRssFeeds.map((feed) => ({
+      ...feed,
+      country: feed.sourceCountry,
+      language: feed.sourceLanguage
+    })),
+    {
+      maxFeeds: numberFromEnv("HELLFIRE_RSS_MAX_FEEDS", 560),
+      maxItemsPerFeed: numberFromEnv("HELLFIRE_RSS_ITEMS_PER_FEED", 5)
+    }
   );
-
-  const items = settled.flatMap((result) =>
-    result.status === "fulfilled" ? result.value : []
-  );
-  const failures = settled.filter((result) => result.status === "rejected");
 
   return {
     payload: items,
+    feedStats: stats,
     warning:
       failures.length > 0
         ? `${failures.length} RSS feed(s) konnten nicht geladen werden.`
@@ -227,19 +236,18 @@ async function loadRssPayload() {
 }
 
 async function loadConflictNewsPayload() {
-  const settled = await Promise.allSettled(
-    conflictNewsFeeds.map(async (feed) => {
-      const xml = await fetchText(new URL(feed.url));
-
-      return parseRssItems(xml, {
-        feedId: feed.id,
-        feedName: feed.name,
-        feedUrl: feed.url,
-        sourceCountry: feed.sourceCountry,
-        sourceLanguage: feed.sourceLanguage,
-        categoryHint:
-          "ukraine russia war conflict shelling missile strike drone ceasefire invasion occupation refugee humanitarian"
-      }).filter((item) => {
+  const { items, failures, stats } = await loadFeedBatch(
+    conflictNewsFeeds.map((feed) => ({
+      ...feed,
+      country: feed.sourceCountry,
+      language: feed.sourceLanguage,
+      defaultCategoryHint:
+        "ukraine russia war conflict shelling missile strike drone ceasefire invasion occupation refugee humanitarian"
+    })),
+    {
+      maxFeeds: numberFromEnv("HELLFIRE_CONFLICT_RSS_MAX_FEEDS", 260),
+      maxItemsPerFeed: numberFromEnv("HELLFIRE_CONFLICT_RSS_ITEMS_PER_FEED", 6),
+      filter: (item) => {
         const text = [
           item.title,
           item.description,
@@ -251,22 +259,87 @@ async function loadConflictNewsPayload() {
           .join(" ");
 
         return conflictKeywordPattern.test(text);
-      });
-    })
+      }
+    }
   );
-
-  const items = settled.flatMap((result) =>
-    result.status === "fulfilled" ? result.value : []
-  );
-  const failures = settled.filter((result) => result.status === "rejected");
 
   return {
     payload: items,
+    feedStats: stats,
     warning:
       failures.length > 0
         ? `${failures.length} conflict-news feed(s) konnten nicht geladen werden.`
         : undefined
   };
+}
+
+type BatchFeed = {
+  id: string;
+  name: string;
+  url: string;
+  defaultCategoryHint?: string;
+  country?: string;
+  language?: string;
+};
+
+async function loadFeedBatch(
+  feeds: BatchFeed[],
+  options: {
+    maxFeeds: number;
+    maxItemsPerFeed: number;
+    filter?: (item: Record<string, unknown>) => boolean;
+  }
+) {
+  const selectedFeeds = feeds.filter(Boolean).slice(0, options.maxFeeds);
+  const concurrency = numberFromEnv("HELLFIRE_RSS_CONCURRENCY", 16);
+  const failures: string[] = [];
+  const stats: FeedLoadStat[] = [];
+  const items: Record<string, unknown>[] = [];
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < selectedFeeds.length) {
+      const feed = selectedFeeds[cursor];
+      cursor += 1;
+
+      try {
+        const xml = await fetchText(new URL(feed.url));
+        const parsed = parseRssItems(xml, {
+          feedId: feed.id,
+          feedName: feed.name,
+          feedUrl: feed.url,
+          sourceCountry: feed.country,
+          sourceLanguage: feed.language,
+          categoryHint: feed.defaultCategoryHint
+        });
+        const filtered = options.filter ? parsed.filter(options.filter) : parsed;
+        const limited = filtered.slice(0, options.maxItemsPerFeed);
+        items.push(...limited);
+        stats.push({
+          feedId: sourceToRawSourceId(feed),
+          ok: true,
+          itemCount: limited.length
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Feed unavailable";
+        failures.push(`${feed.id}: ${message}`);
+        stats.push({
+          feedId: sourceToRawSourceId(feed),
+          ok: false,
+          itemCount: 0,
+          error: message
+        });
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(concurrency, selectedFeeds.length)) }, () =>
+      worker()
+    )
+  );
+
+  return { items, failures, stats };
 }
 
 async function fetchJson(url: URL) {
@@ -286,19 +359,36 @@ async function fetchJson(url: URL) {
 }
 
 async function fetchText(url: URL) {
-  const response = await fetch(url, {
-    headers: {
-      accept: "application/rss+xml, application/xml, text/xml, */*",
-      "user-agent": "HellFire local crisis monitor MVP"
-    },
-    cache: "no-store"
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    numberFromEnv("HELLFIRE_RSS_TIMEOUT_MS", 6500)
+  );
 
-  if (!response.ok) {
-    throw new Error(`Source returned ${response.status}`);
+  try {
+    const response = await fetch(url, {
+      headers: {
+        accept: "application/rss+xml, application/xml, text/xml, */*",
+        "user-agent": "HellFire local crisis monitor MVP"
+      },
+      cache: "no-store",
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error(`Source returned ${response.status}`);
+    }
+
+    return response.text();
+  } finally {
+    clearTimeout(timeout);
   }
+}
 
-  return response.text();
+function numberFromEnv(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function emptyPayload(source: SourceId) {
