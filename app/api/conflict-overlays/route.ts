@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
+import { getGlobalConflictAdminRegions } from "@/lib/server/globalAdminRegions";
 import { getConflictCountryBorders } from "@/lib/server/countryBorders";
 import { getLiveProductionEvents } from "@/lib/server/liveEvents";
 import { listEvents } from "@/lib/server/osintRepository";
-import { getUkraineConflictAdminRegions } from "@/lib/server/ukraineAdminRegions";
 import type {
   ConflictCountryOverlay,
   ConflictOverlayData,
@@ -20,7 +20,7 @@ export async function GET() {
       intensity: Math.max(country.eventCount, country.maxSeverity)
     }))
   );
-  const adminRegions = await getUkraineConflictAdminRegions(events);
+  const adminRegions = await getGlobalConflictAdminRegions(events);
   const data: ConflictOverlayData = {
     countries,
     borderLines,
