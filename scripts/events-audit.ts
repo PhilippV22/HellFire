@@ -1,4 +1,5 @@
 import { isHeadlinePlaceFragment, isLikelyNonEventText } from "@/lib/eventQuality";
+import { isEventFresh } from "@/lib/eventLifecycle";
 import type { CrisisEvent } from "@/types/events";
 
 type ApiResponse = {
@@ -63,9 +64,7 @@ function auditEvents(events: CrisisEvent[]) {
     "Missing source URLs": events.filter((event) =>
       event.sources.some((source) => !source.url)
     ),
-    "Stale by event time >72h": events.filter(
-      (event) => (now - Date.parse(event.eventTime)) / 36e5 > 72
-    )
+    "Stale by lifecycle": events.filter((event) => !isEventFresh(event, new Date(now)))
   };
 }
 

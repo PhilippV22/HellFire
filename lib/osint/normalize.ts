@@ -244,6 +244,9 @@ function normalizeEarthquakeFeature(
     dateString(properties.updated) ||
     dateString(properties.lastupdate) ||
     nowIso();
+  const url =
+    stringValue(properties.url) ||
+    (sourceId === "emsc" ? emscEventUrl(properties) : "");
 
   return {
     sourceId,
@@ -251,7 +254,7 @@ function normalizeEarthquakeFeature(
     externalId: stringValue(item.id) || stringValue(properties.unid) || stableExternalId(title),
     title,
     description: `${title}. Magnitude ${magnitude.toFixed(1)} earthquake reported by ${sourceNames[sourceId]}.`,
-    url: stringValue(properties.url),
+    url,
     country: location?.country || country,
     region: location?.region,
     placeName: location?.placeName || placeName,
@@ -435,27 +438,64 @@ function isActionableReport(report: NormalizedReport) {
   }
 
   if (
-    report.sourceId === "conflict-news" &&
-    !hasAcuteEventTerms(text) &&
-    !hasRelevantConflictContext(text)
+    (report.sourceId === "rss" || report.sourceId === "conflict-news") &&
+    !hasActionableCategoryEvidence(report)
   ) {
     return false;
   }
 
-  if (
-    report.sourceId === "rss" &&
-    report.category === "incident" &&
-    !hasAcuteEventTerms(text)
-  ) {
+  if (report.category === "incident" && !hasAcuteEventTerms(text)) {
     return false;
   }
 
   return true;
 }
 
+function hasActionableCategoryEvidence(report: NormalizedReport) {
+  const text = `${report.title} ${report.description}`;
+
+  if (isLikelyNonEventText(text)) {
+    return false;
+  }
+
+  if (report.category === "conflict") {
+    return hasAcuteConflictTerms(text) || hasRelevantConflictContext(text);
+  }
+
+  if (report.category === "disaster") {
+    return hasDisasterEventTerms(text);
+  }
+
+  if (report.category === "health") {
+    return hasHealthCrisisTerms(text);
+  }
+
+  if (report.category === "protest") {
+    return /\b(protest|demonstration|rally|riot|unrest|counter-protest|counter protest|arrests? at .* rally)\b/i.test(
+      text
+    );
+  }
+
+  if (
+    [
+      "power",
+      "oil",
+      "hospital",
+      "bridge",
+      "rail",
+      "water",
+      "communication"
+    ].includes(report.category)
+  ) {
+    return hasInfrastructureCrisisTerms(report.category, text);
+  }
+
+  return hasAcuteEventTerms(text);
+}
+
 function hasAcuteEventTerms(text: string) {
   return (
-    /\b(killed|injured|dead|attack|strike|airstrike|shelling|missile|rocket|drone|explosion|bombing|clash|fighting|ceasefire|evacuat|refugee|earthquake|flood|wildfire|fire|storm|cyclone|hurricane|outbreak|protest|blackout|collapse|shortage|drought|war)\b/i.test(
+    /\b(killed|injured|dead|attack|strike|airstrike|shelling|missile|rocket|drone|explosion|bombing|clash|fighting|ceasefire|evacuat|refugee|earthquake|flood|wildfire|fire|storm|cyclone|hurricane|outbreak|protest|blackout|collapse|shortage|drought)\b/i.test(
       text
     ) ||
     /(удар|обстрел|обстріл|ракета|дрон|атака|взрыв|вибух|загиб|погиб|ранен|поранен|эвакуац|евакуац|беженц|біженц|наступ|фронт|окупац|оккупац)/i.test(
@@ -464,15 +504,91 @@ function hasAcuteEventTerms(text: string) {
   );
 }
 
+function hasAcuteConflictTerms(text: string) {
+  const normalized = text.toLowerCase();
+  const conflictAction =
+    /\b(armed clash(?:es)?|attack(?:ed|s)?|airstrike|air strike|bombardment|bombing|ceasefire violation|clash(?:es)?|combat|drone strike|firefight|fighting|hostage|incursion|invasion|militant(?:s)? killed|missile strike|rocket attack|shelling|strike(?:s)?|street fighting)\b/i.test(
+      text
+    ) ||
+    /(удар|обстрел|обстріл|ракета|дрон|атака|взрыв|вибух|боестолкнов|бой|бои|наступ|фронт|окупац|оккупац)/i.test(
+      text
+    );
+  const casualtyWithConflictContext =
+    /\b(killed|injured|dead|executed|casualt(?:y|ies))\b/.test(normalized) &&
+    /\b(airstrike|armed|attack|conflict|drone|hamas|hezbollah|idf|israel|militant|missile|police post|russia|shelling|soldier|strike|ukraine|war)\b/.test(
+      normalized
+    );
+
+  return conflictAction || casualtyWithConflictContext;
+}
+
 function hasRelevantConflictContext(text: string) {
   return (
-    /\b(sanction|refugee|evacuat|humanitarian|front line|frontline|war crimes|prisoner swap|hostage|aid convoy|occupation|peacekeeping)\b/i.test(
+    /\b(sanction|refugee|evacuat|humanitarian|front line|frontline|war crimes|prisoner swap|hostage|aid convoy|occupation|peacekeeping|under .* control)\b/i.test(
       text
     ) ||
     /(санкц|гуманитар|гуманітар|фронт|пленные|полонен|заложник|заручник|оккупац|окупац)/i.test(
       text
     )
   );
+}
+
+function hasDisasterEventTerms(text: string) {
+  return /\b(earthquake|aftershock|flood(?:ing)?|flash flood|wildfire|forest fire|bushfire|landslide|mudslide|volcano|eruption|storm|cyclone|hurricane|typhoon|tornado|tsunami|drought|heatwave|evacuat|displaced|emergency declaration|explosion|collapsed?|fire at|fire in|fire near)\b/i.test(
+    text
+  );
+}
+
+function hasHealthCrisisTerms(text: string) {
+  return /\b(cholera|disease|ebola|epidemic|hospital(?:s)? overwhelmed|infected|infection|measles|medical emergency|outbreak|public health emergency|quarantine|who declares)\b/i.test(
+    text
+  );
+}
+
+function hasInfrastructureCrisisTerms(category: EventCategory, text: string) {
+  if (category === "power") {
+    return /\b(blackout|cut power|electricity outage|grid failure|gridlock|nuclear power plant.*(?:attack|drone|fire|hit)|power outage|power plant.*(?:attack|drone|fire|hit)|substation.*(?:attack|explosion|fire|hit)|without power)\b/i.test(
+      text
+    );
+  }
+
+  if (category === "oil") {
+    return /\b(blocked tanker|fuel shortage|fuel terminal.*(?:attack|explosion|fire)|oil spill|pipeline.*(?:attack|blast|explosion|fire|leak)|refinery.*(?:attack|explosion|fire)|tanker.*(?:blocked|fire|hit|strike))\b/i.test(
+      text
+    );
+  }
+
+  if (category === "hospital") {
+    return /\b(hospital|clinic|medical center).*\b(attack|capacity|closed|damaged|evacuat|fire|outage|overwhelmed|strike)\b/i.test(
+      text
+    );
+  }
+
+  if (category === "bridge") {
+    return /\b(bridge|overpass).*\b(closed|collapse|collapsed|damaged|destroyed|strike|washed out)\b/i.test(
+      text
+    );
+  }
+
+  if (category === "rail") {
+    return /\b(rail|railway|train|metro|transit).*\b(closed|collision|derail|disrupt|evacuat|shutdown|strike|suspended)\b/i.test(
+      text
+    );
+  }
+
+  if (category === "water") {
+    return /\b(contaminated water|drinking water|floodwater|sanitation|sewage|water outage|water shortage|water treatment).*\b(contaminat|disrupt|emergency|fail|shortage|shutdown)\b/i.test(
+      text
+    );
+  }
+
+  if (category === "communication") {
+    return /\b(cut the internet|internet blackout|internet outage|mobile network|telecom|communications?).*\b(blackout|cut|disrupt|down|outage|shutdown)\b/i.test(
+      text
+    );
+  }
+
+  return hasAcuteEventTerms(text);
 }
 
 function getGeoJsonFeatures(payload: unknown): Record<string, unknown>[] {
@@ -489,22 +605,22 @@ function classifyCategory(parts: string[]): EventCategory {
   const text = parts.join(" ").toLowerCase();
 
   if (/(earthquake|magnitude|seismic)/.test(text)) return "earthquake";
-  if (/(flood|storm|wildfire|\bfire\b|heatwave|cyclone|hurricane|disaster|landslide|volcano|drought)/.test(text)) {
-    return "disaster";
-  }
-  if (/(health|disease|cholera|ebola|outbreak|heat stress)/.test(text)) return "health";
   if (
-    /\b(war|conflict|clash|violence|shelling|attack|attacks|airstrike|air strike|missile strike|drone strike|missile|rocket|drone|ceasefire|invasion|occupation|offensive|frontline|bombardment|hostage|security incident)\b/.test(text) ||
+    /\b(conflict|clash|violence|shelling|attack|attacks|airstrike|air strike|missile strike|drone strike|missile|rocket|drone|ceasefire|invasion|occupation|offensive|frontline|bombardment|hostage|security incident)\b/.test(text) ||
     /(войн|війна|конфликт|конфлікт|удар|обстрел|обстріл|ракета|дрон|атака|наступ|оккупац|окупац|фронт)/.test(text)
   ) {
     return "conflict";
   }
+  if (/(flood|storm|wildfire|forest fire|bushfire|heatwave|cyclone|hurricane|disaster|landslide|volcano|drought|explosion|fire at|fire in|fire near)/.test(text)) {
+    return "disaster";
+  }
+  if (/(health emergency|disease|cholera|ebola|outbreak|heat stress|epidemic|infected|infection)/.test(text)) return "health";
   if (/\b(protest|demonstration|strike action|labor strike|unrest|rally)\b/.test(text)) return "protest";
   if (/(hospital|clinic|medical capacity)/.test(text)) return "hospital";
-  if (/(power|electric|grid|blackout)/.test(text)) return "power";
-  if (/(oil|fuel|terminal|pipeline)/.test(text)) return "oil";
+  if (/(blackout|electricity|electric grid|grid failure|power outage|power plant|substation)/.test(text)) return "power";
+  if (/(oil spill|fuel shortage|fuel terminal|pipeline|refinery|tanker)/.test(text)) return "oil";
   if (/(bridge|overpass)/.test(text)) return "bridge";
-  if (/\b(rail|train|metro|transit)\b/.test(text)) return "rail";
+  if (/\b(rail|railway|train|metro)\b/.test(text)) return "rail";
   if (/(water|sanitation|pump|drinking)/.test(text)) return "water";
   if (/(communication|telecom|mobile network|internet)/.test(text)) {
     return "communication";
@@ -556,6 +672,12 @@ function extractPlaceFromText(text: string) {
 
 function extractKnownPlaceFromText(text: string) {
   const knownPlaces: Array<[RegExp, string]> = [
+    [/\bmoscow region\b|\brussian capital\b|\bmoscow\b|москва|московск/i, "Moscow"],
+    [/\bbelgorod\b|белгород/i, "Belgorod"],
+    [/\bkursk\b|курск/i, "Kursk"],
+    [/\bbannu\b/i, "Bannu"],
+    [/\btoronto\b/i, "Toronto"],
+    [/\bhormuz\b|\bstrait of hormuz\b/i, "Strait of Hormuz"],
     [/\bkyiv\b|\bkiev\b|киев|київ/i, "Kyiv"],
     [/\bkharkiv\b|харьков|харків/i, "Kharkiv"],
     [/\bdonetsk\b|донецк|донецьк/i, "Donetsk"],
@@ -587,6 +709,9 @@ function extractKnownPlaceFromText(text: string) {
     [/\bstavropol\b|\bnevinnomyssk\b|ставропол|невинномысск/i, "Stavropol Krai"],
     [/\bastrakhan\b|астрахан/i, "Astrakhan Region"],
     [/\bsamsun\b|самсун/i, "Samsun"],
+    [/\bbarakah\b|\bbarakah nuclear/i, "Barakah Nuclear Power Plant"],
+    [/\babu dhabi\b/i, "Abu Dhabi"],
+    [/\buae\b|\bunited arab emirates\b/i, "United Arab Emirates"],
     [/\bnanjing\b/i, "Nanjing"],
     [/\bnorthern angola\b|\bn\. angola\b/i, "Northern Angola"],
     [/\bangola\b/i, "Angola"],
@@ -634,11 +759,13 @@ function extractCountryFromText(text: string) {
   const regionAliases: Array<[RegExp, string]> = [
     [/\bgaza\b|\brafah\b|\bkhan younis\b|\bwest bank\b|\bpalestin/i, "Palestinian Territories"],
     [/\bbeirut\b|\blebanon\b|\blebanese\b/i, "Lebanon"],
+    [/\bukrain(?:e|ian) .*attacks? .*russia\b|\bukraine launches .*attacks? .*russia\b|\bukrainian drone attacks? .*russia\b|\bdrone attacks? on russia\b|\battacks? on russia\b|\bdrones downed.*russia\b|\bmoscow region\b|\brussian capital\b|московск/i, "Russia"],
     [/\bkyiv\b|\bkiev\b|\bkharkiv\b|\bdonetsk\b|\bluhansk\b|\bkherson\b|\bzaporizhzhia\b|\bzaporizhia\b|\bcrimea\b|\bodesa\b|\bodessa\b|\bdnipro\b|\bdnipropetrovsk\b|\bkryvyi rih\b|\bnikopol\b|\bpoltava\b|\bsumy\b|\bkupiansk\b|\bpokrovsk\b|\bkramatorsk\b|\bsloviansk\b|\btoretsk\b|\bchasiv yar\b|\bbakhmut\b|\bavdiivka\b|\bmariupol\b|\bmelitopol\b|\bberdyansk\b|\bukrain|киев|київ|харьков|харків|донецк|донецьк|луганск|луганськ|херсон|запорож|запоріж|крым|крим|одес[саи]|днепр|дніпро|кривой рог|кривий ріг|никопол|нікопол|полтава|сумы|суми|купянск|купянськ|покровск|покровськ|краматорск|краматорськ|славянск|словянськ|торецк|торецьк|часов яр|часів яр|бахмут|авдеевка|авдіївка|мариупол|маріупол|мелитопол|мелітопол|бердянск|бердянськ|украин|україн/i, "Ukraine"],
-    [/\bmoscow\b|\bbelgorod\b|\bkursk\b|\bryazan\b|\bstavropol\b|\bnevinnomyssk\b|\bastrakhan\b|\brussia\b|\brussian\b|москва|белгород|курск|рязань|ставропол|невинномысск|астрахан|росси|росія|росій/i, "Russia"],
+    [/\bmoscow\b|\bmoscow region\b|\brussian capital\b|\bbelgorod\b|\bkursk\b|\bryazan\b|\bstavropol\b|\bnevinnomyssk\b|\bastrakhan\b|\brussia\b|\brussian\b|москва|московск|белгород|курск|рязань|ставропол|невинномысск|астрахан|росси|росія|росій/i, "Russia"],
+    [/\birans? says\b|\biran says\b|\bexecuted .*iran\b|\btehran\b|\biran\b|\birani/i, "Iran"],
     [/\btel aviv\b|\bjerusalem\b|\bisrael/i, "Israel"],
     [/\bdamascus\b|\bsyria\b|\bsyrian\b/i, "Syria"],
-    [/\btehran\b|\biran\b|\birani/i, "Iran"],
+    [/\btoronto\b|\bcanada\b|\bcanadian\b/i, "Canada"],
     [/\bdemocratic republic of the congo\b|\bdr congo\b|\bdrc\b|\bcongo\b/i, "Democratic Republic of the Congo"],
     [/\bkhartoum\b|\bdarfur\b|\bsudan\b|\bsudanese\b/i, "Sudan"],
     [/\bsanaa\b|\byemen\b|\byemeni\b/i, "Yemen"],
@@ -650,6 +777,7 @@ function extractCountryFromText(text: string) {
     [/\bafghanistan\b|\bafghan\b/i, "Afghanistan"],
     [/\biraq\b|\biraqi\b/i, "Iraq"],
     [/\bsamsun\b|\bturkey\b|\bturkish\b|самсун|турц|туреч/i, "Turkey"],
+    [/\bbarakah\b|\babu dhabi\b|\buae\b|\bunited arab emirates\b|\bemirati\b/i, "United Arab Emirates"],
     [/\bsomalia\b|\bsomali\b/i, "Somalia"],
     [/\blibya\b|\blibyan\b/i, "Libya"],
     [/\bmali\b|\btuareg\b/i, "Mali"],
@@ -820,8 +948,28 @@ function stripHtml(value: string) {
     .replace(/<[^>]*>/g, " ")
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&(?:#x)?([0-9a-f]+);/gi, (_, code) => {
+      const parsed = Number.parseInt(code, 16);
+
+      return Number.isFinite(parsed) ? String.fromCharCode(parsed) : " ";
+    })
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function emscEventUrl(properties: Record<string, unknown>) {
+  const unid = stringValue(properties.unid);
+
+  if (unid) {
+    return `https://www.seismicportal.eu/eventdetails.html?unid=${encodeURIComponent(unid)}`;
+  }
+
+  const sourceId = stringValue(properties.source_id);
+
+  return sourceId
+    ? `https://www.seismicportal.eu/eventdetails.html?source_id=${encodeURIComponent(sourceId)}`
+    : "";
 }
 
 type SourceImageCandidate = {
